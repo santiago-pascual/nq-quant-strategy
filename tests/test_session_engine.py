@@ -23,23 +23,25 @@ def test_session_boundaries():
     df = add_session_information(df)
 
     expected_periods = [
-        "ETH",
-        "RTH",
-        "RTH",
-        "BREAK",
-        "BREAK",
-        "ETH",
-        "ETH",
+    "ETH",    # 09:29
+    "RTH",    # 09:30
+    "RTH",    # 09:31
+    "RTH",    # 16:59
+    "BREAK",  # 17:00
+    "BREAK",  # 17:59
+    "ETH",    # 18:00
+    "ETH",    # 18:01
     ]
 
     expected_session_dates = [
-        "2025-01-05",
-        "2025-01-05",
-        "2025-01-05",
-        "2025-01-05",
-        "2025-01-05",
-        "2025-01-06",
-        "2025-01-06",
+    "2025-01-05",  # 09:29
+    "2025-01-05",  # 09:30
+    "2025-01-05",  # 09:31
+    "2025-01-05",  # 16:59
+    "2025-01-05",  # 17:00
+    "2025-01-05",  # 17:59
+    "2025-01-06",  # 18:00
+    "2025-01-06",  # 18:01
     ]
 
     assert df["market_period"].tolist() == expected_periods
@@ -85,7 +87,7 @@ def test_session_boundaries():
 
     assert df.loc[
             df["market_period"] != "RTH",
-            "minutes_since_rth_close"
+            "minutes_until_rth_close"
         ].isna().all()
 
     assert df.loc[
