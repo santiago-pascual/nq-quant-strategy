@@ -35,25 +35,49 @@ def test_return_features():
 
 def test_volatility_features():
 
-    df = pd.DataFrame(
-        {
-            "log_return": [
-                0.01,
-                -0.02,
-                0.03,
-                -0.01,
-                0.02,
-            ]
-        }
-    )
+    log_returns = [0.01] * 60
+
+    df = pd.DataFrame({
+        "log_return": log_returns
+    })
 
     df = add_volatility_features(df)
 
-    expected = np.sqrt(0.01**2 + (-0.02) ** 2 + 0.03**2 + (-0.01) ** 2 + 0.02**2)
+    expected_vol_5 = np.sqrt(5 * 0.01**2)
+    expected_vol_30 = np.sqrt(30 * 0.01**2)
+    expected_vol_60 = np.sqrt(60 * 0.01**2)
+
+    expected_ratio_5_30 = (
+        expected_vol_5 / expected_vol_30
+    )
+
+    expected_ratio_5_60 = (
+        expected_vol_5 / expected_vol_60
+    )
 
     assert np.isnan(df["realized_vol_5"].iloc[3])
 
     np.testing.assert_allclose(
         df["realized_vol_5"].iloc[4],
-        expected,
+        expected_vol_5,
+    )
+
+    np.testing.assert_allclose(
+        df["realized_vol_30"].iloc[29],
+        expected_vol_30,
+    )
+
+    np.testing.assert_allclose(
+        df["realized_vol_60"].iloc[59],
+        expected_vol_60,
+    )
+
+    np.testing.assert_allclose(
+        df["vol_ratio_5_30"].iloc[59],
+        expected_ratio_5_30,
+    )
+
+    np.testing.assert_allclose(
+        df["vol_ratio_5_60"].iloc[59],
+        expected_ratio_5_60,
     )

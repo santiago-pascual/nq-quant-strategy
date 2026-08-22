@@ -23,4 +23,8 @@ def add_volatility_features(df):
 
     df["realized_vol_60"] = np.sqrt((df["log_return"] ** 2).rolling(60).sum())
 
+    df["vol_ratio_5_30"] = df["realized_vol_5"] / df["realized_vol_30"]
+
+    df["vol_ratio_5_60"] = df["realized_vol_5"] / df["realized_vol_60"]
+
     return df
