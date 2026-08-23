@@ -27,4 +27,16 @@ def add_volatility_features(df):
 
     df["vol_ratio_5_60"] = df["realized_vol_5"] / df["realized_vol_60"]
 
+    squared_returns = df["log_return"] ** 2
+
+    df["variance_5"] = squared_returns.rolling(5).mean()
+
+    df["variance_30"] = squared_returns.rolling(30).mean()
+
+    df["variance_60"] = squared_returns.rolling(60).mean()
+
+    df["variance_ratio_5_30"] = df["variance_5"] / df["variance_30"]
+
+    df["variance_ratio_5_60"] = df["variance_5"] / df["variance_60"]
+
     return df

@@ -1,21 +1,18 @@
-from __future__ import annotations  # noqa: I001
+from __future__ import annotations
 
 import numpy as np
 import pandas as pd
 
-from src.session_engine import add_session_information
 from src.data_validator import validate_dataset
-from src.feature_engine import add_return_features
 from src.feature_engine import (
     add_return_features,
     add_volatility_features,
 )
-
+from src.session_engine import add_session_information
+from src.targets import add_future_volatility_targets
 
 def load_data():
-    """
-    Load, validate, and prepare the NQ DataSet.
-    """
+    """Load, validate, and prepare the NQ dataset."""
 
     df = pd.read_csv("data/Dataset_NQ_1min_2022_2025.csv")
 
@@ -26,8 +23,12 @@ def load_data():
     df["timestamp ET"] = df["timestamp ET"].dt.tz_localize("America/New_York")
 
     df = add_session_information(df)
+
     df = add_return_features(df)
+
     df = add_volatility_features(df)
+
+    df = add_future_volatility_targets(df)
 
     return df
 
@@ -52,7 +53,6 @@ print(returns.quantile([0.01, 0.05, 0.50, 0.95, 0.99]))
 print("\nMinimum:", returns.min())
 print("Maximum:", returns.max())
 
-print("\n=== EXTREME RETURNS ===")
 
 print("\n=== EXTREME RETURNS ===")
 
@@ -79,7 +79,6 @@ extreme["intrabar_return"] = extreme["close"] / extreme["open"] - 1
 
 print(extreme.sort_values("return").to_string(index=False))
 
-df = load_data()
 
 print("\n=== VOLATILITY SANITY CHECK ===")
 
@@ -90,8 +89,42 @@ for column in [
     "realized_vol_60",
 ]:
     print(f"\n{column}")
+
     print("Missing:", df[column].isna().sum())
     print("Min:", df[column].min())
     print("Median:", df[column].median())
     print("Mean:", df[column].mean())
+    print("Max:", df[column].max())
+
+
+print("\n=== VOLATILITY RATIO SANITY CHECK ===")
+
+for column in [
+    "vol_ratio_5_30",
+    "vol_ratio_5_60",
+]:
+    print(f"\n{column}")
+
+    print("Missing:", df[column].isna().sum())
+    print("Min:", df[column].min())
+    print("25%:", df[column].quantile(0.25))
+    print("Median:", df[column].median())
+    print("75%:", df[column].quantile(0.75))
+    print("Max:", df[column].max())
+
+print("\n=== VARIANCE EXPANSION SANITY CHECK ===")
+
+for column in [
+    "variance_ratio_5_30",
+    "variance_ratio_5_60",
+]:
+    print(f"\n{column}")
+
+    print("Missing:", df[column].isna().sum())
+    print("Min:", df[column].min())
+    print("25%:", df[column].quantile(0.25))
+    print("Median:", df[column].median())
+    print("75%:", df[column].quantile(0.75))
+    print("95%:", df[column].quantile(0.95))
+    print("99%:", df[column].quantile(0.99))
     print("Max:", df[column].max())
