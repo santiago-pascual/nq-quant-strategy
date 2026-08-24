@@ -11,6 +11,7 @@ from src.feature_engine import (
 from src.session_engine import add_session_information
 from src.targets import add_future_volatility_targets
 
+
 def load_data():
     """Load, validate, and prepare the NQ dataset."""
 
@@ -33,98 +34,53 @@ def load_data():
     return df
 
 
-df = load_data()
+def main():
 
-returns = df["return"].dropna()
+    df = load_data()
 
-print("\n=== RETURN SANITY CHECK ===")
+    returns = df["return"].dropna()
 
-print("Total observations:", len(df))
-print("Valid returns:", len(returns))
-print("Missing returns:", df["return"].isna().sum())
-print("Infinite returns:", np.isinf(returns).sum())
+    print("\n=== RETURN SANITY CHECK ===")
 
-print("\nMean:", returns.mean())
-print("Std:", returns.std())
+    print("Total observations:", len(df))
+    print("Valid returns:", len(returns))
+    print("Missing returns:", df["return"].isna().sum())
+    print("Infinite returns:", np.isinf(returns).sum())
 
-print("\nQuantiles:")
-print(returns.quantile([0.01, 0.05, 0.50, 0.95, 0.99]))
+    print("\nMean:", returns.mean())
+    print("Std:", returns.std())
 
-print("\nMinimum:", returns.min())
-print("Maximum:", returns.max())
+    print("\nQuantiles:")
+    print(returns.quantile([0.01, 0.05, 0.50, 0.95, 0.99]))
 
+    print("\nMinimum:", returns.min())
+    print("Maximum:", returns.max())
 
-print("\n=== EXTREME RETURNS ===")
+    print("\n=== EXTREME RETURNS ===")
 
-extreme_mask = df["return"].abs() > 0.01
+    extreme_mask = df["return"].abs() > 0.01
 
-extreme = df.loc[
-    extreme_mask,
-    [
-        "timestamp ET",
-        "open",
-        "high",
-        "low",
-        "close",
-        "return",
-        "market_period",
-    ],
-].copy()
+    extreme = df.loc[
+        extreme_mask,
+        [
+            "timestamp ET",
+            "open",
+            "high",
+            "low",
+            "close",
+            "return",
+            "market_period",
+        ],
+    ].copy()
 
-extreme["previous_close"] = df["close"].shift(1)[extreme_mask]
+    extreme["previous_close"] = df["close"].shift(1)[extreme_mask]
 
-extreme["gap_return"] = extreme["open"] / extreme["previous_close"] - 1
+    extreme["gap_return"] = extreme["open"] / extreme["previous_close"] - 1
 
-extreme["intrabar_return"] = extreme["close"] / extreme["open"] - 1
+    extreme["intrabar_return"] = extreme["close"] / extreme["open"] - 1
 
-print(extreme.sort_values("return").to_string(index=False))
-
-
-print("\n=== VOLATILITY SANITY CHECK ===")
-
-for column in [
-    "realized_vol_5",
-    "realized_vol_15",
-    "realized_vol_30",
-    "realized_vol_60",
-]:
-    print(f"\n{column}")
-
-    print("Missing:", df[column].isna().sum())
-    print("Min:", df[column].min())
-    print("Median:", df[column].median())
-    print("Mean:", df[column].mean())
-    print("Max:", df[column].max())
+    print(extreme.sort_values("return").to_string(index=False))
 
 
-print("\n=== VOLATILITY RATIO SANITY CHECK ===")
-
-for column in [
-    "vol_ratio_5_30",
-    "vol_ratio_5_60",
-]:
-    print(f"\n{column}")
-
-    print("Missing:", df[column].isna().sum())
-    print("Min:", df[column].min())
-    print("25%:", df[column].quantile(0.25))
-    print("Median:", df[column].median())
-    print("75%:", df[column].quantile(0.75))
-    print("Max:", df[column].max())
-
-print("\n=== VARIANCE EXPANSION SANITY CHECK ===")
-
-for column in [
-    "variance_ratio_5_30",
-    "variance_ratio_5_60",
-]:
-    print(f"\n{column}")
-
-    print("Missing:", df[column].isna().sum())
-    print("Min:", df[column].min())
-    print("25%:", df[column].quantile(0.25))
-    print("Median:", df[column].median())
-    print("75%:", df[column].quantile(0.75))
-    print("95%:", df[column].quantile(0.95))
-    print("99%:", df[column].quantile(0.99))
-    print("Max:", df[column].max())
+if __name__ == "__main__":
+    main()
