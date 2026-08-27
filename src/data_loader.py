@@ -9,7 +9,10 @@ from src.feature_engine import (
     add_volatility_features,
 )
 from src.session_engine import add_session_information
-from src.targets import add_future_volatility_targets
+from src.targets import (
+    add_future_return_targets,
+    add_future_volatility_targets,
+)
 
 
 def load_data():
@@ -30,6 +33,8 @@ def load_data():
     df = add_volatility_features(df)
 
     df = add_future_volatility_targets(df)
+
+    df = add_future_return_targets(df)
 
     return df
 

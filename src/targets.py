@@ -27,3 +27,14 @@ def add_future_volatility_targets(df):
     df["future_vol_30"] = np.sqrt(future_variance_30)
 
     return df
+
+
+def add_future_return_targets(df):
+
+    df["future_return_5"] = df["log_return"].shift(-1).rolling(5).sum().shift(-4)
+
+    df["future_return_15"] = df["log_return"].shift(-1).rolling(15).sum().shift(-14)
+
+    df["future_return_30"] = df["log_return"].shift(-1).rolling(30).sum().shift(-29)
+
+    return df

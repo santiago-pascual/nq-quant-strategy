@@ -1,7 +1,10 @@
 import numpy as np
 import pandas as pd
 
-from src.targets import add_future_volatility_targets
+from src.targets import (
+    add_future_return_targets,
+    add_future_volatility_targets,
+)
 
 
 def test_future_volatility_targets():
@@ -57,5 +60,33 @@ def test_future_targets_do_not_use_past_data():
 
     np.testing.assert_allclose(
         df["future_vol_5"].iloc[0],
+        expected,
+    )
+
+def test_future_return_targets():
+
+    df = pd.DataFrame({
+        "log_return": [
+            0.01,
+            0.02,
+            -0.01,
+            0.03,
+            0.01,
+            0.02,
+        ]
+    })
+
+    df = add_future_return_targets(df)
+
+    expected = (
+        0.02
+        - 0.01
+        + 0.03
+        + 0.01
+        + 0.02
+    )
+
+    np.testing.assert_allclose(
+        df["future_return_5"].iloc[0],
         expected,
     )
