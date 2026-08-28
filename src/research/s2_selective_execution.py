@@ -27,7 +27,7 @@ from src.research.s2_regime_router import (
     select_regime_models,
 )
 
-RESULTS_DIR = Path(__file__).resolve().parent / "results" / "s2"
+RESULTS_DIR = Path(__file__).resolve().parent / "results" / "s2_extended"
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
 
