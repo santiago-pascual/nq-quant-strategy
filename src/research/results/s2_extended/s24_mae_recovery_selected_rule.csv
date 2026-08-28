@@ -1,0 +1,2 @@
+mae_threshold,recovery_level,deadline,oos_delta_R,oos_delta_mean_R,oos_delta_win_rate,oos_delta_DD,positive_holdout_rules,total_holdout_rules,positive_block_count,total_block_count
+0.65,0.3,5,9.589999999999975,0.09589999999999965,-0.04000000000000001,10.169999999999966,75,75,2,3

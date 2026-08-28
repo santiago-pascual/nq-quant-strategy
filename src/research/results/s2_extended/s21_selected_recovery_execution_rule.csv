@@ -1,0 +1,2 @@
+mae_threshold,recovery_level,deadline,development_trades,triggered_trades,recovered_trades,failed_recovery_trades,development_win_rate,development_mean_R,development_total_R,development_delta_R,development_delta_mean_R,development_delta_win_rate,development_delta_max_DD_R,development_profit_factor,development_max_drawdown_R,development_positive_window_pct
+0.6,0.4,5.0,95.0,95.0,11.0,84.0,0.22105263157894736,-0.5417894736842106,-51.470000000000006,16.01999999999999,0.16863157894736824,0.01052631578947369,17.66999999999998,0.13843321057917646,-51.37999999999999,0.2

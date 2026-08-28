@@ -1,0 +1,2 @@
+selected_rule,mae_threshold,recovery_level,deadline,oos_total_R,oos_mean_R,oos_win_rate,oos_profit_factor,oos_max_drawdown_R,delta_R,delta_mean_R,delta_win_rate,delta_DD,positive_windows,total_windows
+RULE_A,0.7,0.2,6,-51.69,-0.5169,0.32,0.19598693420438634,-50.230000000000004,13.959999999999994,0.13959999999999984,0.04999999999999999,14.659999999999968,6,10

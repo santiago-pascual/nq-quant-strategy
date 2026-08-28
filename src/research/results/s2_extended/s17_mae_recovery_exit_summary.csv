@@ -1,0 +1,2 @@
+mae_threshold,recovery_level,recovery_horizon,development_triggered_trades,development_recovery_exits,development_win_rate,development_mean_R,development_total_R,development_delta_R,development_profit_factor,development_max_drawdown_R
+0.7,0.5,4,95,6,0.25263157894736843,-0.6189473684210527,-58.800000000000004,8.68999999999999,0.23347673054360582,-60.889999999999986

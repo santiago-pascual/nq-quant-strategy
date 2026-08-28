@@ -1,0 +1,2 @@
+selected_decision_bar,selected_close_threshold,development_trades,development_total_R,development_PF,development_max_DD,holdout_benchmark_R,holdout_benchmark_PF,holdout_benchmark_DD,holdout_strategy_R,holdout_strategy_PF,holdout_strategy_DD,holdout_delta_R,holdout_delta_PF,holdout_delta_DD,holdout_triggered_trades
+14,0.5,95.0,-69.478,0.15439028664901078,-70.33480000000003,-70.58999999999997,0.1987368669578563,-69.54560000000008,-74.07999999999998,0.1702583310185393,-73.80560000000001,-3.490000000000009,-0.028478535939317012,-4.259999999999934,85

@@ -1,0 +1,2 @@
+holdout_windows,positive_windows,negative_windows,flat_windows,positive_window_pct,total_original_R,total_strategy_R,total_delta_R,mean_window_delta_R,best_window_delta_R,worst_window_delta_R
+11,8,2,1,0.7272727272727273,15.445200000000009,34.345200000000006,18.89999999999999,1.7181818181818174,5.4196,-2.2664000000000035
