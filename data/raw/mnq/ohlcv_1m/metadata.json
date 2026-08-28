@@ -1,0 +1,28 @@
+{
+    "version": 1,
+    "job_id": "GLBX-20260827-M6CBQNPSDB",
+    "query": {
+        "dataset": "GLBX.MDP3",
+        "schema": "ohlcv-1m",
+        "symbols": [
+            "MNQ.v.0"
+        ],
+        "stype_in": "continuous",
+        "stype_out": "instrument_id",
+        "start": 1275782400000000000,
+        "end": 1787788800000000000,
+        "limit": null,
+        "encoding": "csv",
+        "compression": "zstd"
+    },
+    "customizations": {
+        "pretty_px": false,
+        "pretty_ts": false,
+        "map_symbols": true,
+        "split_symbols": false,
+        "split_duration": "year",
+        "split_size": null,
+        "packaging": null,
+        "delivery": "download"
+    }
+}

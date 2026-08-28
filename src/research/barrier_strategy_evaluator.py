@@ -6,7 +6,6 @@ import pandas as pd
 from src.data_loader import load_data
 from src.models.regime import VolatilityRegimeModel
 
-
 # ============================================================
 # CONFIGURATION
 # ============================================================
@@ -140,8 +139,7 @@ def generate_windows(
 
         validation_end = validation_start + pd.DateOffset(months=VALIDATION_MONTHS)
 
-        if validation_end > end:
-            validation_end = end
+        validation_end = min(validation_end, end)
 
         windows.append(
             (
@@ -838,7 +836,7 @@ def evaluate_window(
     window_number: int,
 ) -> dict:
 
-    train, validation, hmm = fit_hmm(
+    train, validation, _hmm = fit_hmm(
         train,
         validation,
     )
@@ -1140,7 +1138,7 @@ def main():
         index=False,
     )
 
-    print(f"\nSaved trade-level results to:")
+    print("\nSaved trade-level results to:")
 
     print(output_path)
 

@@ -9,7 +9,6 @@ from src.models.regime import (
     VolatilityRegimeModel,
 )
 
-
 MOMENTUM_FEATURES = [
     "past_return_10",
     "past_return_15",
@@ -65,16 +64,18 @@ def assign_train_quantiles(
             f"Could not create {N_QUANTILES} unique quantiles for {feature}."
         )
 
+    bin_edges = bins.tolist()
+
     train_quantiles = pd.cut(
         train[feature],
-        bins=bins,
+        bins=bin_edges,
         labels=False,
         include_lowest=True,
     )
 
     oos_quantiles = pd.cut(
         oos[feature],
-        bins=bins,
+        bins=bin_edges,
         labels=False,
         include_lowest=True,
     )

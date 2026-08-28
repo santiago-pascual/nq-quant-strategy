@@ -123,9 +123,11 @@ def assign_quantiles(
     Assign observations to train-defined quantile bins.
     """
 
+    bin_edges = bins.tolist()
+
     return pd.cut(
         series,
-        bins=bins,
+        bins=bin_edges,
         labels=False,
         include_lowest=True,
         duplicates="drop",

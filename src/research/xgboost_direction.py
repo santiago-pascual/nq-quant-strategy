@@ -2,13 +2,11 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-
 from xgboost import XGBClassifier
 
 from src.data_loader import load_data
 from src.models.regime import VolatilityRegimeModel
 from src.research.direction_features import add_directional_features
-
 
 # ============================================================
 # CONFIGURATION
@@ -442,7 +440,7 @@ def main():
         "target_long",
     )
 
-    X_oos_long, y_oos_long = prepare_model_data(
+    X_oos_long, _y_oos_long = prepare_model_data(
         oos,
         feature_columns,
         "target_long",
@@ -454,7 +452,7 @@ def main():
         "target_short",
     )
 
-    X_oos_short, y_oos_short = prepare_model_data(
+    X_oos_short, _y_oos_short = prepare_model_data(
         oos,
         feature_columns,
         "target_short",

@@ -6,7 +6,6 @@ import pandas as pd
 from src.data_loader import load_data
 from src.models.regime import VolatilityRegimeModel
 
-
 # ============================================================
 # CONFIGURATION
 # ============================================================
@@ -776,7 +775,7 @@ def main():
         index=False,
     )
 
-    print(f"\nSaved trades to:")
+    print("\nSaved trades to:")
 
     print(output_path)
 

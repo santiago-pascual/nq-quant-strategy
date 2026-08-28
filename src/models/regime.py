@@ -2,10 +2,8 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-
 from hmmlearn.hmm import GaussianHMM
 from sklearn.preprocessing import StandardScaler
-
 
 HMM_FEATURES = [
     "realized_vol_5",
@@ -91,7 +89,7 @@ class VolatilityRegimeModel:
     def fit(
         self,
         df: pd.DataFrame,
-    ) -> "VolatilityRegimeModel":
+    ) -> VolatilityRegimeModel:
 
         data = self.prepare_data(df)
 

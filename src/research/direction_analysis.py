@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from typing import cast
+
 import pandas as pd
 
 from src.data_loader import load_data
-
 
 PAST_WINDOWS = [1, 3, 5, 10, 15, 30]
 FUTURE_WINDOWS = [5, 15, 30]
@@ -47,7 +48,7 @@ def analyze_momentum_relationship(
         median="median",
     )
 
-    return result
+    return cast(pd.DataFrame, result)
 
 
 def main():

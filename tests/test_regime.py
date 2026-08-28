@@ -44,11 +44,6 @@ def test_standardization():
 
 
 def test_probability_columns():
-
-    model = VolatilityRegimeModel(
-        n_states=3
-    )
-
     probabilities = pd.DataFrame(
         {
             "state_probability_0": [0.7, 0.2],

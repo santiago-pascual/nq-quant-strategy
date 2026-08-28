@@ -6,7 +6,6 @@ import pandas as pd
 from src.data_loader import load_data
 from src.models.regime import HMM_FEATURES, VolatilityRegimeModel
 
-
 # ============================================================
 # CONFIGURATION
 # ============================================================
@@ -76,10 +75,11 @@ def apply_quantiles(
     feature: str,
     bins: np.ndarray,
 ) -> pd.Series:
+    bin_edges = bins.tolist()
 
     return pd.cut(
         df[feature],
-        bins=bins,
+        bins=bin_edges,
         labels=False,
         include_lowest=True,
     )
@@ -469,18 +469,6 @@ def main():
                 # SHORT = negative forward returns
                 #
                 # We evaluate Q5 and Q1 separately.
-                # ------------------------------------------------
-
-                q5_long = q5[q5 > 0]
-
-                q5_short = -q5[q5 < 0]
-
-                q1_long = q1[q1 > 0]
-
-                q1_short = -q1[q1 < 0]
-
-                # ------------------------------------------------
-                # Q5 LONG
                 # ------------------------------------------------
 
                 q5_long_stats = calculate_stats(q5)

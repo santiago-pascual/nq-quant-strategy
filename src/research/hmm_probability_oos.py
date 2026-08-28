@@ -5,7 +5,6 @@ import pandas as pd
 from src.data_loader import load_data
 from src.models.regime import VolatilityRegimeModel
 
-
 TRAIN_END = "2024-12-31"
 OOS_START = "2025-01-01"
 

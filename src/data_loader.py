@@ -13,18 +13,15 @@ from src.targets import (
     add_future_return_targets,
     add_future_volatility_targets,
 )
+from src.databento_loader import load_databento_mnq
 
 
 def load_data():
-    """Load, validate, and prepare the NQ dataset."""
+    """Load, validate, and prepare the MNQ dataset."""
 
-    df = pd.read_csv("data/Dataset_NQ_1min_2022_2025.csv")
-
-    df["timestamp ET"] = pd.to_datetime(df["timestamp ET"])
+    df = load_databento_mnq()
 
     validate_dataset(df)
-
-    df["timestamp ET"] = df["timestamp ET"].dt.tz_localize("America/New_York")
 
     df = add_session_information(df)
 

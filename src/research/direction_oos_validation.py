@@ -6,7 +6,6 @@ import pandas as pd
 from src.data_loader import load_data
 from src.targets import add_future_return_targets
 
-
 TRAIN_END = "2024-12-31 23:59:59"
 OOS_START = "2025-01-01 00:00:00"
 
@@ -55,9 +54,11 @@ def assign_frozen_quantiles(
     calculated exclusively from TRAIN data.
     """
 
+    bin_edges = bins.tolist()
+
     return pd.cut(
         df[feature],
-        bins=bins,
+        bins=bin_edges,
         labels=False,
         include_lowest=True,
         duplicates="drop",

@@ -5,7 +5,6 @@ import pandas as pd
 
 from src.data_loader import load_data
 
-
 # ============================================================
 # CONFIGURATION
 # ============================================================
@@ -330,8 +329,7 @@ def generate_windows(
 
         validation_end = validation_start + pd.DateOffset(months=VALIDATION_MONTHS)
 
-        if validation_end > end:
-            validation_end = end
+        validation_end = min(validation_end, end)
 
         windows.append(
             (

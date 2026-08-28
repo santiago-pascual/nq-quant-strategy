@@ -9,7 +9,6 @@ from src.models.regime import (
     VolatilityRegimeModel,
 )
 
-
 # ============================================================
 # CONFIGURATION
 # ============================================================
@@ -87,9 +86,11 @@ def apply_quantiles(
     Apply TRAIN-derived quantile boundaries.
     """
 
+    bin_edges = bins.tolist()
+
     return pd.cut(
         df[feature],
-        bins=bins,
+        bins=bin_edges,
         labels=False,
         include_lowest=True,
     )

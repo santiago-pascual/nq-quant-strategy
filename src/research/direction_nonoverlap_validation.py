@@ -6,7 +6,6 @@ import pandas as pd
 from src.data_loader import load_data
 from src.models.regime import HMM_FEATURES, VolatilityRegimeModel
 
-
 # ============================================================
 # CONFIGURATION
 # ============================================================
@@ -73,10 +72,11 @@ def apply_quantiles(
     feature: str,
     bins: np.ndarray,
 ) -> pd.Series:
+    bin_edges = bins.tolist()
 
     return pd.cut(
         df[feature],
-        bins=bins,
+        bins=bin_edges,
         labels=False,
         include_lowest=True,
     )

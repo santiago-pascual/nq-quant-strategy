@@ -7,7 +7,6 @@ from src.data_loader import load_data
 from src.models.regime import VolatilityRegimeModel
 from src.research.direction_features import add_directional_features
 
-
 # ============================================================
 # CONFIGURATION
 # ============================================================
@@ -589,10 +588,10 @@ def calculate_metrics(
     daily_std = daily.std(ddof=1)
 
     if daily_std > 0 and len(daily) > 1:
-        daily_sharpe = daily.mean() / daily_std * np.sqrt(252)
+        _daily_sharpe = daily.mean() / daily_std * np.sqrt(252)
 
     else:
-        daily_sharpe = np.nan
+        _daily_sharpe = np.nan
 
     return {
         "trades": len(trades),

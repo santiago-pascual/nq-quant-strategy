@@ -6,7 +6,6 @@ import pandas as pd
 from src.data_loader import load_data
 from src.models.regime import VolatilityRegimeModel
 
-
 # ============================================================
 # CONFIGURATION
 # ============================================================

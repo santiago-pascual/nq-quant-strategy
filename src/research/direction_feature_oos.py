@@ -4,12 +4,10 @@ import numpy as np
 import pandas as pd
 
 from src.data_loader import load_data
+from src.models.regime import VolatilityRegimeModel
 from src.research.direction_features import (
     add_directional_features,
-    DIRECTIONAL_FEATURES,
 )
-from src.models.regime import VolatilityRegimeModel
-
 
 TRAIN_END = pd.Timestamp(
     "2024-12-31 16:59:00",
@@ -121,10 +119,11 @@ def assign_quantiles(
 ) -> pd.Series:
 
     values = df[feature]
+    bin_edges = bins.tolist()
 
     return pd.cut(
         values,
-        bins=bins,
+        bins=bin_edges,
         labels=False,
         include_lowest=True,
     )
@@ -319,15 +318,6 @@ def main():
     # --------------------------------------------------------
 
     print("\n=== FITTING HMM ===")
-
-    hmm_features = [
-        "realized_vol_5",
-        "realized_vol_15",
-        "realized_vol_30",
-        "realized_vol_60",
-        "variance_ratio_5_30",
-        "variance_ratio_5_60",
-    ]
 
     model = VolatilityRegimeModel(
         n_states=3,

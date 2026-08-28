@@ -7,7 +7,6 @@ from src.data_loader import load_data
 from src.models.regime import VolatilityRegimeModel
 from src.research.direction_features import add_directional_features
 
-
 # ============================================================
 # CONFIG
 # ============================================================
