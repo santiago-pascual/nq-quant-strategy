@@ -1,0 +1,2 @@
+frozen_mae,frozen_recovery,frozen_deadline,scenario_count,positive_scenarios,pf_above_1_scenarios,min_total_R,median_total_R,max_total_R,min_mean_R,median_mean_R,max_mean_R,min_win_rate,median_win_rate,max_win_rate,min_max_DD,median_max_DD,max_max_DD
+0.7,0.2,6,125,125,125,15.075200000000008,29.0252,35.665200000000006,0.06947096774193552,0.1337566820276498,0.16435576036866362,0.46543778801843316,0.5207373271889401,0.5576036866359447,-11.87959999999999,-8.738800000000019,-7.2844000000000015

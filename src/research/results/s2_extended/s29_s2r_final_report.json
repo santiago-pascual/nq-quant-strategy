@@ -1,0 +1,38 @@
+{
+  "strategy": "S2R",
+  "status": "FROZEN",
+  "frozen_model": {
+    "mae_threshold_R": 0.7,
+    "recovery_threshold_R": 0.2,
+    "deadline_bars": 6
+  },
+  "oos": {
+    "windows": [
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22
+    ],
+    "trades": 217,
+    "total_R": 34.345200000000006,
+    "mean_R": 0.15827281105990787,
+    "win_rate": 0.5391705069124424,
+    "profit_factor": 1.3815251586300057,
+    "max_drawdown_R": -7.7644000000000055
+  },
+  "robustness": {
+    "S28": "PASS",
+    "S28.1": "PASS",
+    "S28.2": "PASS",
+    "S28.3": "PASS",
+    "S28.4": "PASS"
+  },
+  "decision": "S2R research is frozen. No further parameter optimization within this research cycle."
+}

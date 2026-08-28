@@ -1,0 +1,5 @@
+test,available,passed,rows,S28_1_available,S28_1_rows,source,worst_leave_one_out_R,positive_years,total_years,scenarios,positive_scenarios,pf_above_one
+S28,True,True,3.0,True,9.0,,,,,,,
+S28.2,,True,,,,C:\Users\Alejandra\Desktop\Quant\08_NQ Strategy Project\src\research\results\s2_extended\s28_2_leave_one_window_out.csv,20.0508,,,,,
+S28.3,,True,,,,,,3.0,3.0,,,
+S28.4,,True,,,,,,,,125.0,125.0,125.0
