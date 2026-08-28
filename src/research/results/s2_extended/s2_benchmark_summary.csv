@@ -1,0 +1,2 @@
+trades,wins,losses,win_rate,mean_R,median_R,total_R,profit_factor,max_drawdown_R,longest_losing_streak,windows_with_trades,positive_windows,negative_windows,positive_window_pct,mean_window_R,median_window_R,worst_window_R,best_window_R
+537,244,293,0.4543761638733706,0.04330949720670394,-0.20439999999999997,23.257200000000015,1.0958786193795422,-16.793599999999984,9,22,13,9,0.5909090909090909,1.057145454545455,0.4696,-12.893999999999998,14.166400000000003
