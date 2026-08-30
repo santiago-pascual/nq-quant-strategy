@@ -38,18 +38,6 @@ class BaseStrategy(ABC):
 
     A strategy transforms market information and its internal strategy state
     into a deterministic trading decision.
-
-    The strategy layer is NOT responsible for:
-
-    - account management
-    - position sizing
-    - risk limits
-    - order execution
-    - broker integration
-    - commissions
-    - slippage
-    - portfolio management
-    - regime selection
     """
 
     @property
@@ -69,9 +57,6 @@ class BaseStrategy(ABC):
     ) -> StrategySignal:
         """
         Generate a directional signal from current market information.
-
-        Implementations must use only information available at the current
-        decision point and must not use future information.
         """
 
     def evaluate(
@@ -80,10 +65,6 @@ class BaseStrategy(ABC):
     ) -> StrategyDecision:
         """
         Evaluate the strategy and return a deterministic decision.
-
-        The default implementation maps the directional signal to an action.
-        Stateful strategies may override this method when their decision
-        depends on an existing position or internal strategy state.
         """
 
         signal = self.generate_signal(market_data)
@@ -97,3 +78,33 @@ class BaseStrategy(ABC):
             signal=signal,
             action=action,
         )
+
+    def on_fill(
+        self,
+        *,
+        market_data: Mapping[str, Any],
+        position: Any,
+    ) -> None:
+        """
+        Optional lifecycle hook called after an execution fill.
+
+        Stateful strategies may override this method.
+        """
+
+    def on_market_data(
+        self,
+        market_data: Mapping[str, Any],
+        position: Any,
+    ) -> StrategyDecision | None:
+        """
+        Optional lifecycle hook for an active position.
+
+        Stateful strategies may return an EXIT decision.
+        """
+
+        return None
+
+    def on_exit(self) -> None:
+        """
+        Optional lifecycle hook called after a strategy exit is executed.
+        """

@@ -6,7 +6,11 @@ from src.backtesting.replay import MarketReplay
 from src.domain import Fill, MarketData, Position
 from src.execution import ExecutionEngine
 from src.risk import RiskDecision, RiskManager
-from src.strategies.base import BaseStrategy, StrategyDecision
+from src.strategies.base import (
+    BaseStrategy,
+    StrategyAction,
+    StrategyDecision,
+)
 
 
 @dataclass(frozen=True)
@@ -24,22 +28,19 @@ class BacktestEngine:
     """
     Generic deterministic backtesting orchestrator.
 
-    Pipeline:
+    Strategy-specific behavior remains inside the strategy.
 
-        MarketReplay
-            ↓
-        Strategy
-            ↓
-        RiskManager
-            ↓
-        ExecutionEngine
-            ↓
-        Fill
-            ↓
-        Position
+    The engine only orchestrates:
 
-    The engine orchestrates these components but does not implement their
-    domain-specific logic.
+        replay
+          ↓
+        strategy
+          ↓
+        risk
+          ↓
+        execution
+          ↓
+        position
     """
 
     def __init__(
@@ -60,16 +61,85 @@ class BacktestEngine:
 
         results: list[BacktestStep] = []
 
-        for event in replay:
+        for bar_index, event in enumerate(replay):
             market_data = event.data
 
             self._update_execution_price(market_data)
 
+            context = self._build_market_context(
+                market_data,
+                bar_index=bar_index,
+            )
+
             position = self.execution_engine.get_position(market_data.symbol)
 
-            strategy_decision = self.strategy.evaluate(
-                self._build_market_context(market_data)
-            )
+            # --------------------------------------------------------
+            # ACTIVE TRADE
+            # --------------------------------------------------------
+
+            if position is not None:
+                strategy_exit = self.strategy.on_market_data(
+                    context,
+                    position,
+                )
+
+                if (
+                    strategy_exit is not None
+                    and strategy_exit.action is StrategyAction.EXIT
+                ):
+                    risk_decision = self.risk_manager.evaluate(
+                        decision=strategy_exit,
+                        position=position,
+                    )
+
+                    fills: tuple[Fill, ...] = ()
+
+                    if risk_decision.approved:
+                        if risk_decision.order is not None:
+                            risk_validation = self.risk_manager.validate_order(
+                                risk_decision.order
+                            )
+
+                            if risk_validation.approved:
+                                fills = tuple(
+                                    self.execution_engine.submit_order(
+                                        risk_decision.order
+                                    )
+                                )
+                        else:
+                            fills = tuple(
+                                self.execution_engine.close_position(market_data.symbol)
+                            )
+
+                    position = self.execution_engine.get_position(market_data.symbol)
+
+                    if not position:
+                        on_exit = getattr(
+                            self.strategy,
+                            "on_exit",
+                            None,
+                        )
+
+                        if on_exit is not None and fills:
+                            on_exit()
+
+                    results.append(
+                        BacktestStep(
+                            market_data=market_data,
+                            strategy_decision=strategy_exit,
+                            risk_decision=risk_decision,
+                            fills=fills,
+                            position=position,
+                        )
+                    )
+
+                    continue
+
+            # --------------------------------------------------------
+            # NORMAL STRATEGY EVALUATION
+            # --------------------------------------------------------
+
+            strategy_decision = self.strategy.evaluate(context)
 
             risk_decision = self.risk_manager.evaluate(
                 decision=strategy_decision,
@@ -88,6 +158,16 @@ class BacktestEngine:
 
             position = self.execution_engine.get_position(market_data.symbol)
 
+            # --------------------------------------------------------
+            # ENTRY FILL → STRATEGY LIFECYCLE
+            # --------------------------------------------------------
+
+            if fills and position is not None:
+                self.strategy.on_fill(
+                    market_data=context,
+                    position=position,
+                )
+
             results.append(
                 BacktestStep(
                     market_data=market_data,
@@ -104,12 +184,7 @@ class BacktestEngine:
         self,
         market_data: MarketData,
     ) -> None:
-        """
-        Update the execution engine with the current market price.
-
-        BacktestExecutionEngine exposes set_market_price(). Other execution
-        implementations may not need this operation.
-        """
+        """Update execution engine with the current replay price."""
 
         setter = getattr(
             self.execution_engine,
@@ -126,11 +201,13 @@ class BacktestEngine:
     @staticmethod
     def _build_market_context(
         market_data: MarketData,
+        *,
+        bar_index: int,
     ) -> dict:
         """
         Convert MarketData into the generic strategy context.
 
-        Strategy-specific features belong outside the backtest engine.
+        bar_index belongs to the replay lifecycle, not MarketData itself.
         """
 
         return {
@@ -144,4 +221,5 @@ class BacktestEngine:
             "timeframe": market_data.timeframe,
             "bid": market_data.bid,
             "ask": market_data.ask,
+            "bar_index": bar_index,
         }

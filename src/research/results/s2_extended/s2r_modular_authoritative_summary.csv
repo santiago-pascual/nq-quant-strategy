@@ -1,0 +1,2 @@
+strategy,trades,total_R,mean_R,win_rate,profit_factor,max_drawdown_R,mae_threshold_R,recovery_level_R,recovery_deadline_bars,benchmark_trades,benchmark_total_R,trade_count_match,total_R_match
+S2R_MODULAR_AUTHORITATIVE,537,49.26520000000001,0.09174152700186221,0.5065176908752328,1.2375600347188738,-16.581599999999987,0.7,0.2,6,537,49.2652,True,True
