@@ -1,0 +1,20 @@
+cff-version: 1.2.0
+
+message: "If you use this software or research, please cite it."
+
+title: "MNQ Quantitative Trading Research"
+
+abstract: "A quantitative research project focused on developing and statistically validating trading strategies for Micro E-mini Nasdaq-100 (MNQ) futures."
+
+authors:
+  - family-names: "Pascual"
+    given-names: "Santiago Pascual"
+    orcid: "https://orcid.org/0009-0002-7886-4901"
+
+version: "0.1.0"
+
+date-released: "2026-08-31"
+
+repository-code: "https://github.com/santiago-pascual/nq-quant-strategy"
+
+url: "https://github.com/santiago-pascual/nq-quant-strategy"
