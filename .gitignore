@@ -1,3 +1,33 @@
-
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Environment
+.env
+.env.*
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Raw market data
+data/raw/
+
+# Research generated results
+src/research/**/results/
+
+# General generated data
+*.parquet
+*.feather
+*.pkl
+*.pickle
+
+# Logs
+*.log
+*.tmp
