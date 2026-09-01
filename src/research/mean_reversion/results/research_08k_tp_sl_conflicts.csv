@@ -1,0 +1,4 @@
+candidate,event_id,window,timestamp,side,zscore,tp,sl,horizon,first_tp_bar,first_sl_bar,resolution
+A1,446668,12,2023-04-27 16:00:00-04:00,LONG,-2.6447275,50.0,12.5,3,1.0,1.0,TP_SL_SAME_BAR
+A2_H3,446668,12,2023-04-27 16:00:00-04:00,LONG,-2.6447275,50.0,12.5,3,1.0,1.0,TP_SL_SAME_BAR
+A2_H4,446668,12,2023-04-27 16:00:00-04:00,LONG,-2.6447275,50.0,12.5,4,1.0,1.0,TP_SL_SAME_BAR

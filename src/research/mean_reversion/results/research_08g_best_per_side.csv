@@ -1,0 +1,3 @@
+side,hmm_state,vol_bucket,zscore,observations,tp,sl,rr,horizon,win_rate,expectancy_r,breakeven_wr,wr_edge_vs_breakeven,wr_ge_50,positive_expectancy,sufficient_sample,candidate,research_score,candidate_type
+LONG,2,60-80,3.5,101,20.0,10.0,2.0,120,0.396039603960396,0.18811881188118795,0.3333333333333333,0.06270627062706269,False,True,True,False,0.2732673267326732,POSITIVE_EXPECTANCY_BELOW_50_WR
+SHORT,1,20-40,3.5,130,15.0,10.0,1.5,60,0.4769230769230769,0.19230769230769218,0.4,0.07692307692307687,False,True,True,False,0.31730769230769224,POSITIVE_EXPECTANCY_BELOW_50_WR

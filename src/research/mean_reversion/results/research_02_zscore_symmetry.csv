@@ -1,0 +1,8 @@
+horizon_bars,negative_extreme_mean_return,positive_extreme_mean_return,negative_extreme_reverts,positive_extreme_reverts,symmetric_mean_reversion
+1,6.47110569744971e-06,-8.151426679296355e-07,True,True,True
+3,2.079258168100106e-05,-1.4386980091950754e-05,True,True,True
+5,3.7269543699587514e-05,-3.387417666045057e-05,True,True,True
+10,3.8188796005402585e-05,-3.913814354719578e-05,True,True,True
+20,5.88196997927533e-05,2.3027572795234273e-06,True,False,False
+30,2.5299177683699324e-05,2.4925739272378234e-05,True,False,False
+60,6.215626203928031e-05,9.430291518297471e-05,True,False,False
