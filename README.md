@@ -287,3 +287,15 @@ Only after the RTH system is robust:
 
 This repository is a quantitative research project. Historical or backtested results do not guarantee future performance.
 
+## License
+
+Copyright © 2026 Santiago Pascual. All Rights Reserved.
+
+This repository is publicly available for viewing, educational, and
+research purposes only.
+
+Reproduction, redistribution, commercial use, or derivative works
+require prior written permission from the author.
+
+See [LICENSE](LICENSE) for the complete terms.
+
