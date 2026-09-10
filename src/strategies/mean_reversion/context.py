@@ -6,20 +6,18 @@ from typing import Any
 
 class MeanReversionContextBuilder:
     """
-    Builds the market_data mapping consumed by MeanReversionStrategy.
+    Builds the market-data context consumed by MeanReversionStrategy.
 
-    The strategy receives already-computed research features.
-    This class does NOT calculate indicators, HMM states, volatility
-    percentiles, or z-scores.
+    The builder is responsible only for extracting already-computed
+    strategy features from the incoming market data.
 
-    Expected source fields:
+    It does NOT calculate:
 
-        hmm_state
-        vol_percentile
-        zscore
+        - HMM states
+        - volatility percentiles
+        - z-scores
 
-    Additional fields are preserved so the context can be extended
-    without changing the strategy interface.
+    Those values must already exist in the incoming market data.
     """
 
     REQUIRED_FIELDS = (
@@ -33,14 +31,13 @@ class MeanReversionContextBuilder:
         market_data: Mapping[str, Any],
     ) -> dict[str, Any]:
         """
-        Convert incoming market data into the strategy context.
+        Build a strategy context from incoming market data.
 
-        Missing required fields are preserved as None so that the
-        strategy can deterministically return FLAT rather than
-        crashing on incomplete market data.
+        Existing market fields are preserved. Required Mean Reversion
+        fields are added with None when unavailable.
         """
 
-        context: dict[str, Any] = dict(market_data)
+        context = dict(market_data)
 
         for field in self.REQUIRED_FIELDS:
             context.setdefault(field, None)
