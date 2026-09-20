@@ -59,15 +59,19 @@ OUTPUT_TRADES = RESULTS_DIR / "s8_mae_filter_oos_trades.csv"
 
 OUTPUT_WINDOWS = RESULTS_DIR / "s8_mae_filter_oos_by_window.csv"
 
+
 # ============================================================
 # FROZEN CONFIGURATION
 # ============================================================
 
 STOP_POINTS = 25.0
+
 RR = 1.75
+
 HORIZON = 20
 
 TARGET_R = RR
+
 
 # Candidate filters discovered in S7.
 MAE_THRESHOLDS = [
@@ -81,9 +85,12 @@ MAE_THRESHOLDS = [
     1.10,
 ]
 
+
 # Temporal split.
 # Same 22-window structure used throughout S2.
+
 DEVELOPMENT_WINDOWS = list(range(1, 12))
+
 HOLDOUT_WINDOWS = list(range(12, 23))
 
 
@@ -112,6 +119,7 @@ def find_close_columns(df):
 
         try:
             bar = int(col.split("_")[1].replace("R", ""))
+
         except (
             ValueError,
             IndexError,
@@ -136,6 +144,7 @@ def find_mae_columns(df):
 
         try:
             bar = int(col.split("_")[1].replace("R", ""))
+
         except (
             ValueError,
             IndexError,
@@ -281,6 +290,7 @@ def simulate_filter(
     if pd.isna(close_R):
         # Safety fallback:
         # never manufacture an exit price.
+
         return {
             "strategy_R": original_R,
             "exit_bar": row.get(
@@ -297,6 +307,7 @@ def simulate_filter(
     # For a short:
     #
     #   close_R = +0.50 means -0.50R PnL
+    #
     #   close_R = -0.50 means +0.50R PnL
     #
     # Therefore PnL R = -close_R.
@@ -370,6 +381,7 @@ def calculate_metrics(
 
     if gross_loss > 0:
         PF = gross_profit / gross_loss
+
     else:
         PF = np.inf
 
@@ -384,6 +396,7 @@ def calculate_metrics(
     # --------------------------------------------------------
 
     longest = 0
+
     current = 0
 
     for value in pnl:
@@ -413,7 +426,9 @@ def calculate_metrics(
 
     else:
         positive_pct = np.nan
+
         worst_window = np.nan
+
         best_window = np.nan
 
     return {
@@ -434,11 +449,11 @@ def calculate_metrics(
 
 
 # ============================================================
-# TEST ONE THRESHOLD
+# RUN ONE THRESHOLD
 # ============================================================
 
 
-def test_threshold(
+def run_threshold_test(
     df,
     close_columns,
     mae_columns,
@@ -508,7 +523,10 @@ def window_summary(
 
         strategy_losses = numeric(group["strategy_R"]) < 0
 
+        # ----------------------------------------------------
         # Benchmark PF
+        # ----------------------------------------------------
+
         bp = numeric(group["net_R"])
 
         bp_profit = bp[bp > 0].sum()
@@ -517,7 +535,10 @@ def window_summary(
 
         benchmark_pf = bp_profit / bp_loss if bp_loss > 0 else np.inf
 
+        # ----------------------------------------------------
         # Strategy PF
+        # ----------------------------------------------------
+
         sp = numeric(group["strategy_R"])
 
         sp_profit = sp[sp > 0].sum()
@@ -555,20 +576,29 @@ def window_summary(
 def main():
 
     print("=" * 110)
+
     print("S8 MAE FILTER — TEMPORAL OOS TEST")
+
     print("=" * 110)
 
     print()
+
     print("Frozen benchmark:")
+
     print(f"  Stop            = {STOP_POINTS} points")
+
     print(f"  RR              = {RR}")
+
     print(f"  Horizon         = {HORIZON} bars")
 
     print()
+
     print("Candidate MAE filters:")
+
     print("  " + ", ".join(f"{x:.2f}R" for x in MAE_THRESHOLDS))
 
     print()
+
     print(f"Development windows : {DEVELOPMENT_WINDOWS}")
 
     print(f"Holdout windows     : {HOLDOUT_WINDOWS}")
@@ -581,7 +611,9 @@ def main():
         raise FileNotFoundError(f"Missing enriched dataset:\n{INPUT_FILE}")
 
     print()
+
     print("Loading enriched benchmark...")
+
     print(INPUT_FILE)
 
     df = pd.read_csv(INPUT_FILE)
@@ -603,8 +635,11 @@ def main():
         raise RuntimeError("No mae_* path columns found.")
 
     print()
+
     print("Detected paths:")
+
     print(f"  close bars : {len(close_columns)}")
+
     print(f"  MAE bars   : {len(mae_columns)}")
 
     # ========================================================
@@ -626,18 +661,23 @@ def main():
     # ========================================================
 
     all_trades = []
+
     all_windows = []
+
     summaries = []
 
     print()
+
     print("=" * 110)
+
     print("RUNNING MAE FILTER TESTS")
+
     print("=" * 110)
 
     for threshold in MAE_THRESHOLDS:
         print(f"Testing MAE >= {threshold:.2f}R...")
 
-        tested = test_threshold(
+        tested = run_threshold_test(
             df,
             close_columns,
             mae_columns,
@@ -734,13 +774,12 @@ def main():
     # --------------------------------------------------------
     #
     # Primary criterion:
-    #   maximum development total delta R.
+    #     maximum development total delta R.
     #
     # Secondary:
-    #   positive-window percentage.
+    #     positive-window percentage.
     #
     # This is deliberately simple.
-    #
 
     development_summary = development_summary.sort_values(
         [
@@ -773,9 +812,7 @@ def main():
     # HOLDOUT METRICS
     # ========================================================
 
-    def benchmark_metrics(
-        data,
-    ):
+    def benchmark_metrics(data):
 
         pnl = numeric(data["net_R"]).dropna()
 
@@ -817,8 +854,11 @@ def main():
     # ========================================================
 
     print()
+
     print("=" * 110)
+
     print("DEVELOPMENT SEARCH")
+
     print("=" * 110)
 
     print(
@@ -829,8 +869,11 @@ def main():
     )
 
     print()
+
     print("=" * 110)
+
     print("SELECTED DEVELOPMENT RULE")
+
     print("=" * 110)
 
     selected_dev = development_summary.iloc[0]
@@ -848,15 +891,21 @@ def main():
     # ========================================================
 
     print()
+
     print("=" * 110)
+
     print("HOLDOUT OOS RESULT")
+
     print("=" * 110)
 
     print()
+
     print("Frozen rule:")
+
     print(f"  MAE filter = {selected_threshold:.2f}R")
 
     print()
+
     print("BENCHMARK HOLDOUT")
 
     print(f"  Trades          : {benchmark_oos['trades']}")
@@ -872,6 +921,7 @@ def main():
     print(f"  Max DD          : {benchmark_oos['max_drawdown_R']:.4f}")
 
     print()
+
     print("MAE FILTER HOLDOUT")
 
     print(f"  Trades          : {strategy_oos['trades']}")
@@ -887,6 +937,7 @@ def main():
     print(f"  Max DD          : {strategy_oos['max_drawdown_R']:.4f}")
 
     print()
+
     print("IMPROVEMENT")
 
     print(f"  Delta R         : {delta_R:.4f}")
@@ -900,8 +951,11 @@ def main():
     # ========================================================
 
     print()
+
     print("=" * 110)
+
     print("WINDOW-BY-WINDOW HOLDOUT")
+
     print("=" * 110)
 
     print(
@@ -934,6 +988,7 @@ def main():
     )
 
     # Add OOS metadata to summary.
+
     summary["selected_by_development"] = summary["mae_threshold"] == selected_threshold
 
     summary["development_delta_R"] = np.nan
@@ -969,17 +1024,25 @@ def main():
     )
 
     print()
+
     print("=" * 110)
+
     print("FILES SAVED")
+
     print("=" * 110)
 
     print(OUTPUT_SUMMARY)
+
     print(OUTPUT_TRADES)
+
     print(OUTPUT_WINDOWS)
 
     print()
+
     print("=" * 110)
+
     print("S8 MAE FILTER OOS TEST COMPLETE")
+
     print("=" * 110)
 
 
