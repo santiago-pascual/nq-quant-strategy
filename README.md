@@ -1,262 +1,364 @@
 # NQ Quant Strategy Project
 
-Quantitative research repository for developing a modular, regime-aware strategy portfolio for Nasdaq futures, with initial emphasis on the regular trading hours (RTH) session and research centered on MNQ/NQ intraday data.
+This repository is a quantitative research codebase for Nasdaq index futures, centered on the MNQ 1-minute market and a modular, regime-aware mean-reversion portfolio. It is not a completed production trading system.
 
-## Objective
+## Current state
 
-The current objective is to build a research pipeline in which:
+The current validated portfolio is a three-strategy mean-reversion system built around the canonical Databento MNQ market feed and the modular research pipeline:
 
-1. Market regime is identified from observable features.
-2. Strategies are evaluated only in the regimes where they may be applicable.
-3. Only strategies with positive out-of-sample evidence in a given regime are considered for activation there.
-4. Strategy outputs are intended to feed a shared execution, risk, and account-validation framework.
+- MRL1
+- S2R
+- MRS2
 
-This repository reflects the research architecture and current development stage of that process. It does not represent a completed production trading system.
+These are the current validated strategies for the repository, and they are documented below as the authoritative portfolio state. The old `S2`-only and legacy dataset references in earlier documentation are no longer the primary state of the project.
 
-## Current Status
+## Canonical market data and migration
 
-- `S2` research has been extensively developed and is currently treated as frozen.
-- Active `S2` research scripts remain under `src/research/`.
-- Generated `S2` research outputs are organized under `src/research/results/s2/`.
-- A preserved backup of the active `S2` research scripts exists under `src/research/backup_s2/`.
-- The reusable strategy library has been started under `src/strategies/`.
-- The current priority is completing the RTH strategy portfolio before expanding to additional sessions.
+The current canonical market dataset is the Databento MNQ 1-minute OHLVC feed loaded through:
 
-At this stage:
+- `src.databento_loader.load_databento_mnq()`
 
-- `S2` research: frozen
-- `S2` results organization: complete
-- Strategy library: started
-- RTH portfolio: not complete
-- Final system validation: not started
-- Final funded-account validation: not started
-- Live deployment: not ready
+The raw data lives under:
 
-## Research Architecture
+- `data/raw/mnq/ohlcv_1m/`
 
-The project separates research code from reusable strategy components.
+The current canonical dataset coverage is:
 
-- `src/research/` contains exploratory research, validation scripts, and generated research outputs.
-- `src/strategies/` is intended to hold modular strategy implementations behind a common interface.
-- `src/models/` contains reusable modeling components such as the volatility regime model.
-- `tests/` contains automated tests for core data, feature, session, target, and regime behavior.
+- 2,577,661 rows
+- start: 2019-05-05 18:03 -04:00
+- end: 2026-08-26 19:59 -04:00
 
-The current architecture is designed around a regime-aware portfolio concept rather than running every strategy continuously across all market conditions.
+The repository has migrated from the older, narrower research dataset workflow to this full Databento-based pipeline. The file `data/Dataset_NQ_1min_2022_2025.csv` is a legacy dataset artifact and should not be treated as the current canonical validator for the modular pipeline. The current research code and validation scripts use `load_databento_mnq()` and `src.session_engine` rather than the older market engine workflow.
 
-Conceptually:
+## Repository architecture
 
-`regime -> eligible strategies -> strategy selection -> execution -> risk management -> account model`
+The project currently contains the following relevant areas:
 
-A strategy may be active only in the regimes where out-of-sample evidence supports trading, and inactive elsewhere.
+- `src/` — core market, feature, session, risk, and strategy infrastructure
+- `src/research/` — research scripts, validation workflows, and generated outputs
+- `src/research/mean_reversion/` — current mean-reversion research lineage
+- `src/research/results/s2_extended/` — authoritative S2R benchmark and robustness outputs
+- `src/strategies/` — modular strategy library
+- `src/models/` — model components and regime-related utilities
+- `tests/` — project validation and core behavior tests
+- `trade_visualizer.py` — current trade visualization tool for frozen strategy trade streams
 
-## S2 Research Context
+## Current validated mean-reversion strategies
 
-`S2` is a selective Nasdaq futures research line evaluated across volatility regimes. The repository structure and research outputs indicate that this work progressed through multiple stages including:
+### MRL1
 
-- exploratory robustness and feature-related analysis
-- regime routing and selective execution
-- final validation
-- statistical validation
-- funded-account simulation variants
-- architecture comparison
+Direction: LONG
 
-The central research principle is that a strategy should not be judged only by aggregate results across all market conditions if the strategy is intended to operate only in a subset of regimes.
+Signal conditions:
 
-Accordingly, the research process distinguishes between:
+- HMM state 1
+- VOL20–40
+- Z <= -2.5
 
-- strategy discovery
-- regime-specific evaluation
-- walk-forward and out-of-sample validation
-- strategy and regime selection
-- portfolio construction
-- final system-level validation
+Execution:
 
-`S2` is currently treated as a completed research component rather than an actively optimized one, except in the case of a genuine implementation or data issue.
+- TP = 25 points
+- SL = 37.5 points
+- Horizon = 8 bars
+- RR = 0.6667
 
-## Validation Philosophy
+Validated 08AA result:
 
-The repository reflects a progressively stricter validation approach:
+- 483 trades
+- win rate = 60.2484%
+- net = +20.34R
+- expectancy = +0.042112R
+- profit factor = 1.196042
+- max drawdown = -8.393333R
 
-1. Hypothesis formation
-2. Strategy implementation
-3. Unit and invariant testing
-4. Historical backtesting
-5. Regime analysis
-6. Walk-forward validation
-7. Out-of-sample evaluation
-8. Strategy and regime selection
-9. Portfolio and system construction
-10. Final statistical validation
-11. Funded-account simulation
-12. Only later, potential live deployment
+### S2R
 
-Statistical tools already present in the research workflow include or support:
+S2R has multiple historical streams in the repository, but only one is authoritative for the current frozen benchmark.
 
-- bootstrap analysis
-- block bootstrap analysis
-- Monte Carlo path simulation
-- drawdown analysis
-- losing-streak analysis
-- monthly performance analysis
-- walk-forward and out-of-sample evaluation
+The authoritative current stream is:
 
-An important constraint in this project is that validation of an individual strategy is not automatically treated as validation of the final portfolio. Final statistical assessment is intended to be performed on the complete regime-aware system after portfolio construction.
+- `src/research/results/s2_extended/s2r_modular_authoritative_reproduction.csv`
 
-## Implemented Core Components
+This is the 537-trade frozen reproduction and should be treated as the canonical S2R validation stream. The 5231-row `s2r_modular_full_databento_trades.csv` file is a broad export stream and is not the validated benchmark. It must not be presented as the authoritative S2R result.
 
-The repository already includes several reusable core building blocks:
+Current S2R rules:
 
-- dataset loading and validation in `src/data_loader.py` and `src/data_validator.py`
-- session labeling in `src/session_engine.py`
-- return, volatility, and target generation in `src/feature_engine.py` and `src/targets.py`
-- a volatility regime model in `src/models/regime.py`
-- an initial strategy package scaffold in `src/strategies/`
+- HMM state 2
+- VOL40–60
+- SHORT
+- Quality >= 0.75
+- SL = 25 points
+- TP = 43.75 points
+- Horizon = 20 bars
+- Reward/risk = 1.75R
+- MAE/recovery condition:
+  - 0.70R MAE threshold
+  - +0.20R recovery
+  - deadline = 6 bars
 
-The current dataset loaded by the project is:
+Validated authoritative result for the frozen trade stream:
 
-- `data/Dataset_NQ_1min_2022_2025.csv`
+- 537 trades
+- total = +23.2572R
+- win rate = 45.4376%
+- profit factor = 1.095879
+- expectancy = +0.043309R
+- max drawdown ≈ -16.7936R using the contribution-based calculation
 
-Tests currently present cover:
-
-- data loading
-- feature engineering
-- session logic
-- target construction
-- regime-model behavior
+### MRS2
 
-## Strategy Library Direction
+Direction: SHORT
 
-The strategy library is intended to hold independent, deterministic, modular strategy implementations that can be evaluated consistently.
+Signal conditions:
 
-Future strategy families may include:
-
-- mean reversion
-- volatility expansion
-- momentum
-- breakout
-- trend following
-- liquidity or sweep-based ideas
-- other statistically testable short-term Nasdaq strategies
+- HMM state 2
+- VOL80–100
+- Z >= +2.0
 
-These should be understood as research directions, not as claims that the strategies are already implemented or validated in this repository.
+Execution:
 
-Each strategy is intended to eventually:
+- TP = 27.5 points
+- SL = 25 points
+- Horizon = 30 bars
+- RR = 1.10
 
-- expose a clearly defined signal model
-- behave deterministically
-- integrate with shared execution conventions
-- produce comparable trade-level outputs
-- be tested independently
-- be evaluated across regimes
-- be evaluated out of sample before portfolio inclusion
+Validated 08AA result:
 
-## Market Scope
+- 1,052 trades
+- win rate = 51.616%
+- net = +83.51R
+- expectancy = +0.079382R
+- profit factor = 1.170366
+- max drawdown = -14.45R
 
-Current scope:
+## 08AA modular reproduction and validation audit
 
-- Nasdaq futures research
-- primary focus on MNQ/NQ intraday data
-- initial emphasis on the RTH trading window
+The current modular reproduction pipeline is:
 
-Potential future research directions:
+- `src/research/mean_reversion/research/08aa_modular_reproduction.py`
 
-- New York afternoon
-- London session
-- Asia session
-- cross-session information
-- broader 24-hour market structure
+This script replays the frozen mean-reversion candidates through the modular backtest and lifecycle architecture. It is the authoritative reproduction check for the MRL1 and MRS2 research pipeline and is the code path that verifies the research context before strategy execution is accepted.
 
-These are future directions only and should not be interpreted as current system coverage.
+Current audit facts from the modular pipeline:
 
-## Funded-Account Research
+- Research 07 events: 825,717
+- HMM rows: 825,717
+- Missing HMM: 0
+- Missing z-score: 0
+- Market rows: 2,577,661
+- Valid realized_vol_30: 2,577,631
+- RTH rows: 825,746
+- Event timestamp == RTH timestamp: 825,717 / 825,717
+- Event close == market close: 825,717 / 825,717
+- Complete events: 825,717
 
-Funded-account simulation is treated as a separate layer from strategy discovery. The repository contains `S2` funded-account research scripts, but those should not be interpreted as final conclusions about the complete portfolio.
+Volatility bucket counts:
 
-The broader intended account-level research includes topics such as:
+- VOL0–20: 163,633
+- VOL20–40: 168,992
+- VOL40–60: 170,842
+- VOL60–80: 171,449
+- VOL80–100: 150,801
 
-- evaluation or challenge-stage constraints
-- funded-account constraints
-- position and risk sizing
-- drawdown limits
-- profit targets
-- payout timing and rules
-- withdrawal policy
-- evaluation or subscription costs
-- time to pass
-- pass and failure probabilities
-- expected payouts
-- account survival
+Candidate events:
 
-Complete funded-account validation is intended to follow completion of the broader RTH strategy portfolio.
+- MRS2: 2,253
+- MRL1: 840
 
-## Design Principles
+Modular trade reproduction totals:
 
-- No look-ahead bias
-- No leakage between training and out-of-sample data
-- Frozen parameters during final validation
-- No accidental optimization during validation
-- Separation of research code from reusable strategy code
-- Modular implementations
-- Reproducible experiments
-- Explicit execution costs
-- Regime-aware evaluation
-- Preference for out-of-sample evidence over in-sample fit
-- Validation of the complete portfolio, not only isolated components
-- Preference for robustness over maximum backtest performance
+- MRS2: 1,052
+- MRL1: 483
 
-## Repository Structure
+Audit status: PASS
 
-```text
-src/
-├── strategies/
-│   ├── __init__.py
-│   └── base.py
-├── models/
-│   └── regime.py
-└── research/
-    ├── results/
-    │   └── s2/
-    ├── backup_s2/
-    └── s2_*.py
+This audit establishes that the market, event context, HMM assignment, z-score data, and RTH alignment are all internally consistent before strategy-level trades are treated as valid. It is validation of the research pipeline, not a claim that every regime bucket is equally mature or that new strategy work is complete.
 
-data/
-tests/
-```
+## Current three-strategy portfolio
 
-Briefly:
+The portfolio analysis script is:
 
-- `src/strategies/` contains reusable strategy components and interfaces.
-- `src/research/` contains experiments, validation scripts, and research workflows.
-- `src/research/results/` contains generated research outputs.
-- `src/research/backup_s2/` contains preserved pre-refactor copies of active `S2` research scripts.
-- `tests/` contains automated test coverage for core infrastructure.
+- `src/research/mean_reversion/research/12_mr_3_strategy_visual_report.py`
 
-## Roadmap
+This script aggregates the frozen trade streams for the three validated strategies and confirms the current portfolio count and ordering.
 
-### Phase 1 - S2
+Current portfolio composition:
 
-- research `S2`
-- identify where `S2` is effective
-- freeze `S2`
-- organize research outputs
+- MRL1 = 483 trades
+- S2R = 537 trades
+- MRS2 = 1,052 trades
+- total = 2,072 trades
 
-Status: done / frozen
+Current portfolio metrics:
 
-### Phase 2 - Strategy Library
+- total R = +127.1072R
+- expectancy = +0.061345R
+- median trade = +0.0733R
+- win rate = 52.03%
+- profit factor = 1.1520
+- max drawdown = -17.2469R
+- average win = +0.8939R
+- average loss = -0.8450R
+- payoff = 1.0579
+- longest win streak = 12
+- longest loss streak = 9
+- annualized Sharpe = 1.5692
+- Sortino = 2.6524
 
-- establish a common strategy interface
-- migrate `S2` into the modular architecture without changing behavior
-- implement additional candidate strategy families
-- test each strategy independently
+Duplicate check:
 
-Status: in progress
+- duplicate (entry_timestamp, strategy) = 0
 
-### Phase 3 - Regime Coverage
+Daily correlations:
 
-- evaluate each candidate across volatility regimes
-- identify uncovered or weak regime areas
-- prioritize new strategy research for those gaps
-- avoid forcing strategies into regimes where evidence is weak
+- MRL1 / S2R = 0.016
+- MRL1 / MRS2 = 0.010
+- S2R / MRS2 = 0.125
+
+Yearly returns:
+
+- 2019: +1.19R
+- 2020: -1.5167R
+- 2021: +9.6277R
+- 2022: +47.5944R
+- 2023: +1.8648R
+- 2024: +16.1801R
+- 2025: +28.0595R
+- 2026: +24.1073R
+
+Important: 2019 and 2026 are partial years and should not be described as full-year performance.
+
+The visual-report output directory expected by the script is:
+
+- `src/research/results/portfolio_3_strategy/`
+
+This directory does not currently appear in the checked-in repository snapshot, so the script is present but its generated visual products are not currently populated in this checkout.
+
+## Regime map
+
+The current mean-reversion regime coverage is:
+
+- VOL0–20: uncovered
+- VOL20–40: MRL1
+- VOL40–60: S2R
+- VOL60–80: uncovered
+- VOL80–100: MRS2
+
+Research philosophy:
+
+- do not add a strategy merely to fill a regime bucket
+- a new candidate may replace, complement, or extend an existing strategy only when the evidence supports it
+- there has been limited research into VOL0–20 and VOL60–80, and those buckets are therefore currently treated as uncovered rather than as failed strategy territories
+
+## Trade visualizer
+
+The current trade visualizer is:
+
+- `trade_visualizer.py`
+
+It is designed to load and inspect frozen trade streams against the canonical Databento market data. It can:
+
+- load one or more trade CSV files
+- load the canonical Databento MNQ market data via `load_databento_mnq()`
+- render local price action around an entry and exit
+- overlay entry, exit, stop-loss, and take-profit levels when available
+- filter trades by strategy, side, result, and volatility regime
+- move through prior/next/random trades in the selected CSV
+
+Important implementation detail: the visualizer defaults to the validated S2R trade stream:
+
+- `src/research/results/s2_extended/s2r_modular_authoritative_reproduction.csv`
+
+This is the 537-trade stream. The broader 5231-row `s2r_modular_full_databento_trades.csv` export is intentionally not treated as the authoritative frozen trade list and should not be documented as the validated S2R stream.
+
+## Funded simulation work
+
+The repository contains funded simulation scripts, but they are historical research artifacts rather than final full-portfolio validation.
+
+Relevant scripts:
+
+- `src/research/mean_reversion/research/09_mr_funded_simulation.py`
+- `src/research/mean_reversion/research/10_mr_portfolio_funded_simulation.py`
+
+Important distinction:
+
+- the older funded simulation work excluded S2R and therefore should not be presented as the final/current full three-strategy portfolio result
+- the current validated three-strategy portfolio is the historical trade-stream analysis above, not a funded-account simulation result
+
+The repo contains historical account-based research around the MR strategies, but the final code snapshot does not contain a new funded simulation that re-asserts the full 3-strategy portfolio as the latest account-level validation result.
+
+## Git and project status
+
+Current repository status as checked in this workspace:
+
+- branch: `santiago-pascual-quant-strategy-fix`
+- git tag: `v1.1-mr-validation-complete`
+- checkpoint commit: `4b54c1b`
+- working tree: clean
+
+The project is intentionally not creating another major branch at this stage. The current rule in the project workflow is to branch only when core strategy research is complete, the portfolio and model stack are validated, and paper trading or the next major operational phase begins.
+
+## Session Momentum research status
+
+Session Momentum is a separate research stream and is not part of the validated production portfolio.
+
+There is currently no active `src/research/mean_reversion/research/13_session_momentum_analysis.py` implementation in this repository snapshot. The repo should therefore treat Session Momentum as exploratory, not validated, unless a later branch adds a committed implementation and supporting results.
+
+Current concept from the research notes:
+
+- NASDAQ / NY session open
+- M5 timeframe
+- EMA12
+- EMA120
+- stop = 8 × ATR
+- direction determined from the first NY opening candle relative to EMA12
+- one trade per session
+- no fixed profit target
+- once trade reaches +0.5R, trailing activates using EMA120
+
+Important entry definition:
+
+- opening candle is 09:30–09:35 America/New_York
+- entry occurs at 09:35 America/New_York
+- entry price is the close of the 09:30–09:35 opening candle
+- not 09:40 and not the next candle open
+
+ATR audit status:
+
+- ATR grid: [5, 7, 10, 12, 14, 16, 20, 24, 30, 40]
+- ATR multiplier: 8.0
+- EMA signal: 12
+- EMA trail: 120
+- trail trigger: +0.5R
+
+Opening-candle audit (data-integrity / implementation check, not profitability evidence):
+
+- 1-minute rows: 2,577,661
+- complete RTH M5 bars: 144,866
+- sessions: 1,887
+- expected signal candle: 09:30–09:35 America/New_York
+- expected entry time: 09:35
+- expected entry price: close of opening candle
+- sessions with 09:30 bar: 1,885
+- sessions without 09:30 bar: 2
+- 09:30 bars found: 1,885
+- bad opening-minute labels: 0
+
+Session Momentum should remain separated from the validated portfolio. It is a research avenue for strategy-result analysis, regime/context analysis, and robustness checks, but not a currently validated production component.
+
+## Research philosophy
+
+The project is built around the following rules:
+
+- validate market and event integrity before strategy conclusions
+- separate exploratory work from frozen validation output
+- keep strategy implementation and research analysis modular
+- prefer verified, frozen trade streams over broad event exports
+- do not imply portfolio validation from a single strategy result
+- keep regime-aware strategy selection evidence-driven
+- avoid hyper-optimization when the underlying regime signal is still diagnostic rather than proven
+
+The current repo state is a validated mean-reversion portfolio on the canonical Databento MNQ dataset, with S2R, MRL1, and MRS2 as the active frozen strategy references, and the rest of the more recent research directions kept clearly separated as exploratory or work-in-progress.
 
 ### Phase 4 - RTH Portfolio
 
