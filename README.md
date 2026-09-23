@@ -1,403 +1,253 @@
-# NQ Quant Strategy Project
+# NQ Quant Strategy
 
-This repository is a quantitative research codebase for Nasdaq index futures, centered on the MNQ 1-minute market and a modular, regime-aware mean-reversion portfolio. It is not a completed production trading system.
+Quantitative research infrastructure for Nasdaq futures (NQ/MNQ), built around canonical 1-minute Databento data, modular strategy implementations, reproducible backtests, reconciliation audits, portfolio analysis, robustness testing, and execution/account simulations.
 
-## Current state
+The repository is at a **pre-paper-trading** stage. Its historical results and account simulations are research evidence only; they are not live validation or a guarantee of future performance.
 
-The current validated portfolio is a three-strategy mean-reversion system built around the canonical Databento MNQ market feed and the modular research pipeline:
+## Overview
 
-- MRL1
-- S2R
-- MRS2
+The project combines four frozen strategy components into one research portfolio:
 
-These are the current validated strategies for the repository, and they are documented below as the authoritative portfolio state. The old `S2`-only and legacy dataset references in earlier documentation are no longer the primary state of the project.
+- **MRL1** — mean reversion, long
+- **S2R** — regime-filtered short strategy with adverse-excursion recovery logic
+- **MRS2** — mean reversion, short
+- **ORB** — 30-minute opening-range breakout
 
-## Canonical market data and migration
+The codebase separates strategy logic from research orchestration and result generation. The validation workflow emphasizes deterministic data loading, baseline-to-modular reconciliation, a common out-of-sample (OOS) period, execution-friction stress, statistical path analysis, and chronological funded-account simulation.
 
-The current canonical market dataset is the Databento MNQ 1-minute OHLVC feed loaded through:
+## Final System
 
-- `src.databento_loader.load_databento_mnq()`
-
-The raw data lives under:
-
-- `data/raw/mnq/ohlcv_1m/`
-
-The current canonical dataset coverage is:
-
-- 2,577,661 rows
-- start: 2019-05-05 18:03 -04:00
-- end: 2026-08-26 19:59 -04:00
-
-The repository has migrated from the older, narrower research dataset workflow to this full Databento-based pipeline. The file `data/Dataset_NQ_1min_2022_2025.csv` is a legacy dataset artifact and should not be treated as the current canonical validator for the modular pipeline. The current research code and validation scripts use `load_databento_mnq()` and `src.session_engine` rather than the older market engine workflow.
-
-## Repository architecture
-
-The project currently contains the following relevant areas:
-
-- `src/` — core market, feature, session, risk, and strategy infrastructure
-- `src/research/` — research scripts, validation workflows, and generated outputs
-- `src/research/mean_reversion/` — current mean-reversion research lineage
-- `src/research/results/s2_extended/` — authoritative S2R benchmark and robustness outputs
-- `src/strategies/` — modular strategy library
-- `src/models/` — model components and regime-related utilities
-- `tests/` — project validation and core behavior tests
-- `trade_visualizer.py` — current trade visualization tool for frozen strategy trade streams
-
-## Current validated mean-reversion strategies
+The current frozen system is **MRL1 + S2R + MRS2 + ORB**. The four components are confirmed by the current portfolio scripts, modular strategy code, and the `v1.3-full-system-validation` milestone.
 
 ### MRL1
 
-Direction: LONG
-
-Signal conditions:
-
-- HMM state 1
-- VOL20–40
-- Z <= -2.5
-
-Execution:
-
-- TP = 25 points
-- SL = 37.5 points
-- Horizon = 8 bars
-- RR = 0.6667
-
-Validated 08AA result:
-
-- 483 trades
-- win rate = 60.2484%
-- net = +20.34R
-- expectancy = +0.042112R
-- profit factor = 1.196042
-- max drawdown = -8.393333R
+| Field | Frozen definition |
+|---|---|
+| Context | HMM state 1; volatility percentile 20–40 |
+| Direction | Long |
+| Entry | Z-score at or below -2.5 |
+| Exit | 25-point target, 37.5-point stop, or 8-bar horizon |
+| Reward/risk | 25 / 37.5 = 0.6667R |
 
 ### S2R
 
-S2R has multiple historical streams in the repository, but only one is authoritative for the current frozen benchmark.
-
-The authoritative current stream is:
-
-- `src/research/results/s2_extended/s2r_modular_authoritative_reproduction.csv`
-
-This is the 537-trade frozen reproduction and should be treated as the canonical S2R validation stream. The 5231-row `s2r_modular_full_databento_trades.csv` file is a broad export stream and is not the validated benchmark. It must not be presented as the authoritative S2R result.
-
-Current S2R rules:
-
-- HMM state 2
-- VOL40–60
-- SHORT
-- Quality >= 0.75
-- SL = 25 points
-- TP = 43.75 points
-- Horizon = 20 bars
-- Reward/risk = 1.75R
-- MAE/recovery condition:
-  - 0.70R MAE threshold
-  - +0.20R recovery
-  - deadline = 6 bars
-
-Validated authoritative result for the frozen trade stream:
-
-- 537 trades
-- total = +23.2572R
-- win rate = 45.4376%
-- profit factor = 1.095879
-- expectancy = +0.043309R
-- max drawdown ≈ -16.7936R using the contribution-based calculation
+| Field | Frozen definition |
+|---|---|
+| Context | HMM state 2; volatility percentile 40–60 |
+| Direction | Short |
+| Entry | Quality score at least 0.75 |
+| Exit | 25-point stop, 1.75R target, or 20-bar horizon |
+| Lifecycle | 0.70R adverse-excursion threshold, +0.20R recovery, six-bar recovery deadline |
 
 ### MRS2
 
-Direction: SHORT
+| Field | Frozen definition |
+|---|---|
+| Context | HMM state 2; volatility percentile 80–100 |
+| Direction | Short |
+| Entry | Z-score at or above +2.0 |
+| Exit | 27.5-point target, 25-point stop, or 30-bar horizon |
+| Reward/risk | 27.5 / 25 = 1.10R |
 
-Signal conditions:
+### ORB
 
-- HMM state 2
-- VOL80–100
-- Z >= +2.0
+| Field | Frozen definition |
+|---|---|
+| Context | New York regular trading hours |
+| Opening range | 09:30–10:00 America/New_York |
+| Direction | Long above the range high; short below the range low |
+| Entry | Breakout touch between 10:00 and 11:00 |
+| Exit | 2R target, opposite-side stop, or RTH close |
+| Lifecycle | One trade per session; stop takes priority when stop and target occur in the same bar |
 
-Execution:
+The ORB modular reproduction checks the frozen standalone OOS benchmark of **1,442 trades**, **+156.026568R**, **0.1082015R expectancy**, **48.404993% win rate**, **1.255941 profit factor**, and **-14.175719R maximum drawdown**. These are ORB reconciliation values, not live results and not the four-strategy portfolio scorecard.
 
-- TP = 27.5 points
-- SL = 25 points
-- Horizon = 30 bars
-- RR = 1.10
+## Portfolio Architecture
 
-Validated 08AA result:
+The portfolio is assembled from the frozen trade streams and sorted chronologically by entry timestamp, with strategy attribution retained for every trade. The portfolio analysis performs:
 
-- 1,052 trades
-- win rate = 51.616%
-- net = +83.51R
-- expectancy = +0.079382R
-- profit factor = 1.170366
-- max drawdown = -14.45R
+- full-sample stream-count checks: MRL1 **483**, S2R **537**, MRS2 **1,052**, ORB **1,747**; total **3,819**
+- common-OOS partitioning for the official window
+- duplicate checks on `(entry_timestamp, strategy)`
+- strategy-level and combined accounting in R
+- daily, monthly, and yearly breakdowns
+- daily strategy correlations, same-day interaction, entry overlap, concurrency, and contribution analysis
 
-## 08AA modular reproduction and validation audit
+The common OOS trade-count audits in the funded simulation are MRL1 **430**, S2R **520**, MRS2 **863**, and ORB **1,442**, for **3,255** trades. The analysis preserves chronological ordering; it does not shuffle individual trades.
 
-The current modular reproduction pipeline is:
+The repository does not contain the generated four-strategy `portfolio_metrics.csv` or common-OOS portfolio output in the checked-in tree. Consequently, this README does not reproduce unverified portfolio expectancy, profit factor, drawdown, Sharpe, Sortino, or total-R values.
 
-- `src/research/mean_reversion/research/08aa_modular_reproduction.py`
+## Validation Methodology
 
-This script replays the frozen mean-reversion candidates through the modular backtest and lifecycle architecture. It is the authoritative reproduction check for the MRL1 and MRS2 research pipeline and is the code path that verifies the research context before strategy execution is accepted.
+The validation pipeline is chronological:
 
-Current audit facts from the modular pipeline:
+1. **Individual strategy validation** — freezes strategy definitions and evaluates their historical trade streams.
+2. **Modular/baseline reconciliation** — compares modular implementations against the established research baselines. Mean reversion uses the modular 08AA reproduction; ORB uses baseline and modular reconciliation scripts.
+3. **Common-OOS portfolio validation** — merges the four frozen streams, applies the exact shared OOS window, checks counts and ordering, and produces portfolio-level accounting.
+4. **Robustness analysis** — tests whether the frozen portfolio's conclusions depend on one path, one time window, one strategy, or a narrow parameter/execution assumption.
+5. **Transaction-cost and slippage stress** — applies the configured MNQ cost model and adverse deterministic/random execution assumptions to the common OOS stream.
+6. **Monte Carlo and bootstrap analysis** — evaluates trade permutation, IID trade, IID daily, moving-block daily, strategy-preserving daily, execution, and missed-trade paths.
+7. **Funded-account simulation** — replays the chronological common-OOS portfolio under Combine and XFA account policies without independently shuffling trades.
 
-- Research 07 events: 825,717
-- HMM rows: 825,717
-- Missing HMM: 0
-- Missing z-score: 0
-- Market rows: 2,577,661
-- Valid realized_vol_30: 2,577,631
-- RTH rows: 825,746
-- Event timestamp == RTH timestamp: 825,717 / 825,717
-- Event close == market close: 825,717 / 825,717
-- Complete events: 825,717
+These stages test reproducibility and historical robustness. They do not establish live profitability or production readiness.
 
-Volatility bucket counts:
+## Out-of-Sample Results
 
-- VOL0–20: 163,633
-- VOL20–40: 168,992
-- VOL40–60: 170,842
-- VOL60–80: 171,449
-- VOL80–100: 150,801
+The official common OOS window is:
 
-Candidate events:
+**2020-06-23 through 2026-06-19**, inclusive, in the New York session calendar.
 
-- MRS2: 2,253
-- MRL1: 840
+The committed analysis code verifies the following common-OOS counts:
 
-Modular trade reproduction totals:
+| Strategy | OOS trades |
+|---|---:|
+| MRL1 | 430 |
+| S2R | 520 |
+| MRS2 | 863 |
+| ORB | 1,442 |
+| **Total** | **3,255** |
 
-- MRS2: 1,052
-- MRL1: 483
+The portfolio analysis script writes the exact combined metrics to `src\research\results\portfolio\portfolio_metrics.csv` when run. That generated file is not committed in the current repository snapshot, so no portfolio-level expectancy, profit factor, win rate, maximum drawdown, Sharpe, Sortino, trading-day count, or total-R claim is made here.
 
-Audit status: PASS
+## Robustness Testing
 
-This audit establishes that the market, event context, HMM assignment, z-score data, and RTH alignment are all internally consistent before strategy-level trades are treated as valid. It is validation of the research pipeline, not a claim that every regime bucket is equally mature or that new strategy work is complete.
+The full-system robustness engine is `src\research\portfolio\22_mr_orb_portfolio_robustness.py`. It operates on the official common OOS and implements:
 
-## Current three-strategy portfolio
+| Test | Failure mode examined |
+|---|---|
+| Deterministic cost/slippage grid | Sensitivity to repeatable execution friction |
+| Random adverse slippage | Variation in fills rather than one fixed slippage path |
+| Trade-sequence permutation | Dependence of drawdown on the observed trade order |
+| IID trade bootstrap | Uncertainty under independent trade resampling |
+| IID daily bootstrap | Uncertainty while retaining daily aggregation |
+| Moving-block daily bootstrap | Dependence on clustered daily outcomes |
+| Strategy-preserving daily bootstrap | Whether strategy composition matters beyond aggregate daily returns |
+| Missed-trade stress | Degradation from execution failures or unavailable fills |
+| Worst-tail degradation | Sensitivity to additional damage in the worst historical trades |
+| Year/month/week stability | Concentration in particular calendar periods |
+| Drawdown episodes and duration | Depth and persistence of loss periods |
+| Strategy contribution/correlation | Dependence on one component or correlated components |
+| Entry overlap/concurrency | Simultaneous exposure and operational load |
+
+The engine is configured for **50,000** simulations, moving blocks of **5, 10, and 20 days**, random adverse slippage up to **10 ticks per side**, and missed-trade stress of **1%, 2%, 5%, and 10%**. These are test configurations, not claims about actual live execution.
+
+Generated scorecards and simulation tables are written under `src\research\results\portfolio_robustness\`. They are generated artifacts and are not present in the checked-in repository snapshot; numerical robustness conclusions are therefore intentionally not reproduced here.
+
+## Transaction Costs and Slippage
+
+The full-system scripts model the following MNQ assumptions:
 
-The portfolio analysis script is:
+- MNQ tick size: **0.25 points**
+- MNQ tick value: **$0.50**
+- MNQ point value: **$2.00**
+- configured Topstep MNQ round-turn cost: **$1.22**
 
-- `src/research/mean_reversion/research/12_mr_3_strategy_visual_report.py`
-
-This script aggregates the frozen trade streams for the three validated strategies and confirms the current portfolio count and ordering.
-
-Current portfolio composition:
-
-- MRL1 = 483 trades
-- S2R = 537 trades
-- MRS2 = 1,052 trades
-- total = 2,072 trades
-
-Current portfolio metrics:
-
-- total R = +127.1072R
-- expectancy = +0.061345R
-- median trade = +0.0733R
-- win rate = 52.03%
-- profit factor = 1.1520
-- max drawdown = -17.2469R
-- average win = +0.8939R
-- average loss = -0.8450R
-- payoff = 1.0579
-- longest win streak = 12
-- longest loss streak = 9
-- annualized Sharpe = 1.5692
-- Sortino = 2.6524
-
-Duplicate check:
-
-- duplicate (entry_timestamp, strategy) = 0
-
-Daily correlations:
-
-- MRL1 / S2R = 0.016
-- MRL1 / MRS2 = 0.010
-- S2R / MRS2 = 0.125
-
-Yearly returns:
-
-- 2019: +1.19R
-- 2020: -1.5167R
-- 2021: +9.6277R
-- 2022: +47.5944R
-- 2023: +1.8648R
-- 2024: +16.1801R
-- 2025: +28.0595R
-- 2026: +24.1073R
-
-Important: 2019 and 2026 are partial years and should not be described as full-year performance.
-
-The visual-report output directory expected by the script is:
-
-- `src/research/results/portfolio_3_strategy/`
-
-This directory does not currently appear in the checked-in repository snapshot, so the script is present but its generated visual products are not currently populated in this checkout.
-
-## Regime map
-
-The current mean-reversion regime coverage is:
-
-- VOL0–20: uncovered
-- VOL20–40: MRL1
-- VOL40–60: S2R
-- VOL60–80: uncovered
-- VOL80–100: MRS2
-
-Research philosophy:
-
-- do not add a strategy merely to fill a regime bucket
-- a new candidate may replace, complement, or extend an existing strategy only when the evidence supports it
-- there has been limited research into VOL0–20 and VOL60–80, and those buckets are therefore currently treated as uncovered rather than as failed strategy territories
-
-## Trade visualizer
-
-The current trade visualizer is:
-
-- `trade_visualizer.py`
-
-It is designed to load and inspect frozen trade streams against the canonical Databento market data. It can:
-
-- load one or more trade CSV files
-- load the canonical Databento MNQ market data via `load_databento_mnq()`
-- render local price action around an entry and exit
-- overlay entry, exit, stop-loss, and take-profit levels when available
-- filter trades by strategy, side, result, and volatility regime
-- move through prior/next/random trades in the selected CSV
-
-Important implementation detail: the visualizer defaults to the validated S2R trade stream:
-
-- `src/research/results/s2_extended/s2r_modular_authoritative_reproduction.csv`
-
-This is the 537-trade stream. The broader 5231-row `s2r_modular_full_databento_trades.csv` export is intentionally not treated as the authoritative frozen trade list and should not be documented as the validated S2R stream.
-
-## Funded simulation work
-
-The repository contains funded simulation scripts, but they are historical research artifacts rather than final full-portfolio validation.
-
-Relevant scripts:
-
-- `src/research/mean_reversion/research/09_mr_funded_simulation.py`
-- `src/research/mean_reversion/research/10_mr_portfolio_funded_simulation.py`
-
-Important distinction:
-
-- the older funded simulation work excluded S2R and therefore should not be presented as the final/current full three-strategy portfolio result
-- the current validated three-strategy portfolio is the historical trade-stream analysis above, not a funded-account simulation result
-
-The repo contains historical account-based research around the MR strategies, but the final code snapshot does not contain a new funded simulation that re-asserts the full 3-strategy portfolio as the latest account-level validation result.
-
-## Git and project status
-
-Current repository status as checked in this workspace:
-
-- branch: `santiago-pascual-quant-strategy-fix`
-- git tag: `v1.1-mr-validation-complete`
-- checkpoint commit: `4b54c1b`
-- working tree: clean
-
-The project is intentionally not creating another major branch at this stage. The current rule in the project workflow is to branch only when core strategy research is complete, the portfolio and model stack are validated, and paper trading or the next major operational phase begins.
-
-## Session Momentum research status
-
-Session Momentum is a separate research stream and is not part of the validated production portfolio.
-
-There is currently no active `src/research/mean_reversion/research/13_session_momentum_analysis.py` implementation in this repository snapshot. The repo should therefore treat Session Momentum as exploratory, not validated, unless a later branch adds a committed implementation and supporting results.
-
-Current concept from the research notes:
-
-- NASDAQ / NY session open
-- M5 timeframe
-- EMA12
-- EMA120
-- stop = 8 × ATR
-- direction determined from the first NY opening candle relative to EMA12
-- one trade per session
-- no fixed profit target
-- once trade reaches +0.5R, trailing activates using EMA120
-
-Important entry definition:
-
-- opening candle is 09:30–09:35 America/New_York
-- entry occurs at 09:35 America/New_York
-- entry price is the close of the 09:30–09:35 opening candle
-- not 09:40 and not the next candle open
-
-ATR audit status:
-
-- ATR grid: [5, 7, 10, 12, 14, 16, 20, 24, 30, 40]
-- ATR multiplier: 8.0
-- EMA signal: 12
-- EMA trail: 120
-- trail trigger: +0.5R
-
-Opening-candle audit (data-integrity / implementation check, not profitability evidence):
-
-- 1-minute rows: 2,577,661
-- complete RTH M5 bars: 144,866
-- sessions: 1,887
-- expected signal candle: 09:30–09:35 America/New_York
-- expected entry time: 09:35
-- expected entry price: close of opening candle
-- sessions with 09:30 bar: 1,885
-- sessions without 09:30 bar: 2
-- 09:30 bars found: 1,885
-- bad opening-minute labels: 0
-
-Session Momentum should remain separated from the validated portfolio. It is a research avenue for strategy-result analysis, regime/context analysis, and robustness checks, but not a currently validated production component.
-
-## Research philosophy
-
-The project is built around the following rules:
-
-- validate market and event integrity before strategy conclusions
-- separate exploratory work from frozen validation output
-- keep strategy implementation and research analysis modular
-- prefer verified, frozen trade streams over broad event exports
-- do not imply portfolio validation from a single strategy result
-- keep regime-aware strategy selection evidence-driven
-- avoid hyper-optimization when the underlying regime signal is still diagnostic rather than proven
-
-The current repo state is a validated mean-reversion portfolio on the canonical Databento MNQ dataset, with S2R, MRL1, and MRS2 as the active frozen strategy references, and the rest of the more recent research directions kept clearly separated as exploratory or work-in-progress.
-
-### Phase 4 - RTH Portfolio
-
-- combine validated strategies
-- establish regime-aware strategy selection
-- establish common execution and risk handling
-- validate the complete RTH system
-
-### Phase 5 - Final Validation
-
-- out-of-sample validation of the complete system
-- bootstrap and block bootstrap
-- Monte Carlo analysis
-- drawdown and robustness analysis
-- funded-account simulation
-
-### Phase 6 - Expansion
-
-Only after the RTH system is robust:
-
-- New York afternoon
-- London
-- Asia
-- cross-session information
-- broader market coverage
+The deterministic portfolio stress grid tests 0, 1, 2, 3, 4, 5, 6, 8, 10, 12, 16, and 20 ticks per side. Random execution stress samples adverse slippage independently on each side up to the configured scenario maximum. These are explicit research assumptions, not guaranteed broker, exchange, or funded-account fills.
+
+## Funded Account Validation
+
+`src\research\portfolio\22_full_system_funded_simulation.py` performs account-policy simulation separately from strategy validation:
+
+- exact common-OOS portfolio sequence only
+- chronological trade order preserved
+- real historical trading-day boundaries preserved
+- no individual trade shuffling
+- **50,000** replay paths
+- vectorized and scalar engines checked by a deterministic parity audit over **25** paths, capped at **250** trades for the audit
+
+### Combine model
+
+- starting balance: **$50,000**
+- profit target: **+$3,000**
+- maximum loss: **-$2,000**
+- maximum simulated path length: **500 trades**
+- risk policies include 0.25%, 0.50%, 0.75%, 1.00%, and 0.50%-to-1.00% after a $1,000 threshold
+
+### XFA model
+
+- starting balance: **$50,000**
+- fixed loss floor: **$48,000**
+- minimum winning days: **5**
+- minimum winning-day profit: **$150**
+- maximum simulated path length: **2,000 trades**
+- payout intervals: 20, 21, and 22 days
+- payout amounts: $500 through $2,000 across the configured grid
+
+The code writes Combine and XFA result tables under `src\research\results\portfolio\funded\`. Those generated outputs are not committed in the current repository snapshot, so no pass rates, survival rates, payouts, or account-level performance figures are asserted here. This is a simulation of account constraints, not evidence of future funded-account performance.
+
+## Reproducibility
+
+The canonical market path is:
+
+- loader: `src\databento_loader.py`, via `load_databento_mnq()`
+- raw data: `data\raw\mnq\ohlcv_1m\`
+- legacy dataset: `data\Dataset_NQ_1min_2022_2025.csv`; it is not the canonical modular validation source
+
+Representative research commands from the committed scripts:
+
+```powershell
+python .\src\research\orb\20_orb_modular_reproduction.py
+python .\src\research\portfolio\21_mr_orb_portfolio_analysis.py
+python .\src\research\portfolio\22_mr_orb_portfolio_robustness.py
+python .\src\research\portfolio\22_full_system_funded_simulation.py
+```
+
+The scripts perform their own input and count audits and write CSV/PNG reports under `src\research\results\`. The authoritative S2R stream is `src\research\results\s2_extended\s2r_modular_authoritative_reproduction.csv`; the broader `s2r_modular_full_databento_trades.csv` export is not the frozen benchmark.
+
+## Project Structure
+
+```text
+data\
+  raw\mnq\ohlcv_1m\       Canonical Databento MNQ 1-minute files
+src\
+  databento_loader.py     Canonical data loader
+  session_engine.py       Session and RTH infrastructure
+  strategies\
+    mean_reversion\       MRL1 and MRS2 modular strategies
+    s2r\                  S2R modular strategy and recovery logic
+    orb\                  ORB modular strategy and lifecycle
+  research\
+    mean_reversion\       Mean-reversion validation and robustness
+    orb\                  ORB baseline, reconciliation, robustness, funding
+    portfolio\            Four-strategy portfolio and account validation
+    results\              Frozen inputs and generated research outputs
+tests\                    Strategy and lifecycle tests
+trade_visualizer.py       Trade inspection against canonical market data
+```
+
+The repository also contains older S2, backup, directional, barrier, and exploratory research scripts. They remain research history and are not additional components of the frozen four-strategy system.
+
+## Validation Status
+
+- [x] MRL1 and MRS2 mean-reversion validation and modular reproduction
+- [x] S2R modular reproduction and recovery-lifecycle audit
+- [x] ORB baseline, execution audit, and baseline-to-modular reconciliation
+- [x] Four-strategy portfolio integration and common-OOS count audits
+- [x] Portfolio robustness test implementations
+- [x] Transaction-cost and slippage stress-test implementations
+- [x] Monte Carlo, bootstrap, block-bootstrap, tail, missed-trade, and concentration analyses implemented
+- [x] Chronological Combine/XFA funded-account simulation implementation
+- [x] Scalar/vector parity audit implementation
+- [ ] Paper-trading validation
+- [ ] Live execution validation
+- [ ] Production risk/execution infrastructure
+
+The latest repository milestone is `v1.3-full-system-validation`. The validation code is complete enough to support a reproducible pre-paper-trading research system, but the repository does not establish live or paper-trading performance.
+
+## Limitations and Next Stage
+
+The results are dependent on historical Databento bars, bar-level execution assumptions, conservative intrabar ambiguity rules, modeled costs, and the selected OOS window. Generated full-system metric and account-result files are not committed in this snapshot, and the research code cannot establish fill quality, liquidity, market impact, or future regime behavior.
+
+The next stage is to freeze the reproducible research inputs, verify the complete outputs in a controlled environment, build the execution and risk infrastructure, and conduct paper trading. No claim is made that the historical system will work live.
 
 ## Disclaimer
 
-This repository is a quantitative research project. Historical or backtested results do not guarantee future performance.
+Historical and backtested results are not guarantees of future performance. Simulated funded-account results are not live results. Execution quality, slippage, liquidity, transaction costs, market impact, and regime changes can materially affect live outcomes.
 
 ## License
 
 Copyright © 2026 Santiago Pascual. All Rights Reserved.
 
-This repository is publicly available for viewing, educational, and
-research purposes only.
-
-Reproduction, redistribution, commercial use, or derivative works
-require prior written permission from the author.
+This repository is publicly available for viewing, educational, and research purposes only. Reproduction, redistribution, commercial use, or derivative works require prior written permission from the author.
 
 See [LICENSE](LICENSE) for the complete terms.
-
