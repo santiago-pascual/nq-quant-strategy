@@ -54,7 +54,7 @@ Current baseline assumptions:
     ATR formula         = Wilder/RMA-style EMA of True Range
     M5 data             = RTH 09:30-16:00 ET
     signal              = first 09:30 M5 close vs EMA(12)
-    entry               = next M5 bar open (09:35 ET)
+    entry               = close of first M5 bar (09:35 ET)
     initial stop        = 8 * ATR measured on signal bar
     activation          = intrabar touch of +0.5R
     EMA trail            = EMA(120) known at bar close; applied from NEXT bar
@@ -70,6 +70,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
+import sys
 
 import numpy as np
 import pandas as pd
@@ -104,7 +105,7 @@ NY_OPEN_MINUTE = 30
 RTH_END_HOUR = 16
 RTH_END_MINUTE = 0
 
-ENTRY_OFFSET_BARS = 0  # Entry at 09:35 ET close of the 09:30-09:35 opening candle.
+ENTRY_OFFSET_BARS = 0  # entry is the closing price of the 09:30-09:35 bar
 ALLOW_OVERNIGHT_HOLD = True
 
 # Reference split shown in the second screenshot.
@@ -131,6 +132,11 @@ REFERENCE = {
 # =============================================================================
 # PROJECT IMPORTS
 # =============================================================================
+
+# Make the project root importable when this script is executed directly
+# from src\research\mean_reversion\research\.
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from src.databento_loader import load_databento_mnq
 from src.session_engine import add_session_information
@@ -244,17 +250,11 @@ def load_market() -> pd.DataFrame:
         "Databento market",
     )
 
-    df["timestamp_et"] = pd.to_datetime(
-        df["timestamp ET"], errors="coerce"
-    )
+    df["timestamp_et"] = pd.to_datetime(df["timestamp ET"], errors="coerce")
     if df["timestamp_et"].dt.tz is None:
-        df["timestamp_et"] = df["timestamp_et"].dt.tz_localize(
-            "America/New_York"
-        )
+        df["timestamp_et"] = df["timestamp_et"].dt.tz_localize("America/New_York")
     else:
-        df["timestamp_et"] = df["timestamp_et"].dt.tz_convert(
-            "America/New_York"
-        )
+        df["timestamp_et"] = df["timestamp_et"].dt.tz_convert("America/New_York")
 
     df = df.sort_values("timestamp_et").reset_index(drop=True)
     print(f"1-minute rows: {len(df):,}")
@@ -264,7 +264,7 @@ def load_market() -> pd.DataFrame:
     # Existing project session classification is kept as the canonical source.
     df = add_session_information(df)
     if "market_period" in df.columns:
-        df = df.loc[df["market_period".eq("RTH")]].copy()
+        df = df.loc[df["market_period"].eq("RTH")].copy()
 
     # Keep only regular NY cash session. This is the interpretation of
     # "NASDAQ session open" used by the strategy screenshot.
@@ -316,14 +316,14 @@ def resample_m5(rth: pd.DataFrame) -> pd.DataFrame:
 
 
 def add_indicators(m5: pd.DataFrame) -> pd.DataFrame:
-    banner("3. BUILD EMA(12), EMA(120), ATR AUDIT GRID")
+    banner(f"3. BUILD EMA(12), EMA(120), ATR({ATR_PERIOD})")
 
     x = m5.copy()
     x["ema12"] = x["close"].ewm(span=EMA_SIGNAL, adjust=False).mean()
     x["ema120"] = x["close"].ewm(span=EMA_TRAIL, adjust=False).mean()
 
     prev_close = x["close"].shift(1)
-    x["true_range"] = pd.concat(
+    tr = pd.concat(
         [
             x["high"] - x["low"],
             (x["high"] - prev_close).abs(),
@@ -332,17 +332,13 @@ def add_indicators(m5: pd.DataFrame) -> pd.DataFrame:
         axis=1,
     ).max(axis=1)
 
-    # Compute every ATR once. The HMM/VOL context is independent of ATR and
-    # is therefore NOT recomputed for every period.
-    for period in ATR_AUDIT_PERIODS:
-        x[f"atr_{period}"] = x["true_range"].ewm(
-            alpha=1.0 / period,
-            adjust=False,
-            min_periods=period,
-        ).mean()
-
-    # Baseline column consumed by run_strategy().
-    x["atr"] = x[f"atr_{ATR_PERIOD}"]
+    x["true_range"] = tr
+    # Wilder-style ATR/RMA.
+    x["atr"] = tr.ewm(
+        alpha=1.0 / ATR_PERIOD,
+        adjust=False,
+        min_periods=ATR_PERIOD,
+    ).mean()
 
     return x
 
@@ -381,12 +377,10 @@ def load_context_sources() -> tuple[pd.DataFrame, pd.DataFrame]:
 
     events["timestamp"] = utc(events["timestamp"])
     hmm["timestamp"] = utc(hmm["timestamp"])
-    events["hmm_state"] = hmm.set_index("event_id")["hmm_state"].reindex(
-        events["event_id"]
-    ).to_numpy()
-    events["timestamp_et"] = events["timestamp"].dt.tz_convert(
-        "America/New_York"
+    events["hmm_state"] = (
+        hmm.set_index("event_id")["hmm_state"].reindex(events["event_id"]).to_numpy()
     )
+    events["timestamp_et"] = events["timestamp"].dt.tz_convert("America/New_York")
 
     return events, hmm
 
@@ -443,9 +437,9 @@ def build_m5_context(m5: pd.DataFrame, events: pd.DataFrame) -> pd.DataFrame:
     # For every M5 timestamp, use the canonical 1-minute state/regime observed
     # at the exact signal-bar timestamp (09:30). This is an entry-context label,
     # not a strategy filter.
-    event = events[
-        ["timestamp", "timestamp_et", "hmm_state"]
-    ].drop_duplicates("timestamp")
+    event = events[["timestamp", "timestamp_et", "hmm_state"]].drop_duplicates(
+        "timestamp"
+    )
 
     lookup = market[
         ["timestamp_et", "realized_vol_30", "vol_percentile", "vol_bucket"]
@@ -533,39 +527,35 @@ def finalize_trade(
     }
 
 
-def run_strategy(m5: pd.DataFrame, atr_period: int | None = None, verbose: bool = True) -> pd.DataFrame:
-    if verbose:
-        banner(f"5. RUN SESSION MOMENTUM — ATR({atr_period or ATR_PERIOD})")
+def run_strategy(m5: pd.DataFrame) -> pd.DataFrame:
+    banner("5. RUN SESSION MOMENTUM BASELINE")
 
     x = m5.copy().sort_values("timestamp_et").reset_index(drop=True)
     x["session_date"] = x["timestamp_et"].dt.date
-
-    if atr_period is None:
-        atr_period = ATR_PERIOD
-
-    atr_col = f"atr_{atr_period}"
-    if atr_col in x.columns:
-        x["atr"] = x[atr_col]
-    elif "atr" not in x.columns:
-        raise KeyError(f"Missing ATR column: {atr_col}")
 
     trades: list[dict] = []
     pos: Position | None = None
     sessions_with_entry: set = set()
 
+    # We deliberately process bars chronologically. A position may carry
+    # overnight if ALLOW_OVERNIGHT_HOLD=True.
     for i, row in x.iterrows():
         ts = row["timestamp_et"]
 
-        # Manage existing position first.
+        # ------------------------------------------------------------------
+        # Manage existing position FIRST.
+        # ------------------------------------------------------------------
         if pos is not None:
+            # Initial stop remains active until trailing has been activated.
             if pos.side == "LONG":
                 stop = (
                     pos.trail_stop
                     if pos.activated and pos.trail_stop is not None
                     else pos.initial_stop
                 )
-
                 if row["low"] <= stop:
+                    # Conservative OHLC assumption: if stop is touched,
+                    # execute at stop. This avoids favorable intrabar pricing.
                     trades.append(
                         finalize_trade(
                             pos,
@@ -577,23 +567,17 @@ def run_strategy(m5: pd.DataFrame, atr_period: int | None = None, verbose: bool 
                     pos = None
                     continue
 
+                # Activation is based on the bar's high. The EMA trail is
+                # applied only from the NEXT bar, so no close/EMA lookahead.
                 activation_level = (
-                    pos.entry_price
-                    + TRAIL_ACTIVATION_R * pos.risk_points
+                    pos.entry_price + TRAIL_ACTIVATION_R * pos.risk_points
                 )
-
                 if not pos.activated and row["high"] >= activation_level:
                     pos.activated = True
                     pos.activation_time = ts
-                    pos.trail_stop = max(
-                        pos.initial_stop,
-                        float(row["ema120"]),
-                    )
+                    pos.trail_stop = max(pos.initial_stop, float(row["ema120"]))
                 elif pos.activated:
-                    pos.trail_stop = max(
-                        float(pos.trail_stop),
-                        float(row["ema120"]),
-                    )
+                    pos.trail_stop = max(float(pos.trail_stop), float(row["ema120"]))
 
             else:
                 stop = (
@@ -601,7 +585,6 @@ def run_strategy(m5: pd.DataFrame, atr_period: int | None = None, verbose: bool 
                     if pos.activated and pos.trail_stop is not None
                     else pos.initial_stop
                 )
-
                 if row["high"] >= stop:
                     trades.append(
                         finalize_trade(
@@ -615,41 +598,32 @@ def run_strategy(m5: pd.DataFrame, atr_period: int | None = None, verbose: bool 
                     continue
 
                 activation_level = (
-                    pos.entry_price
-                    - TRAIL_ACTIVATION_R * pos.risk_points
+                    pos.entry_price - TRAIL_ACTIVATION_R * pos.risk_points
                 )
-
                 if not pos.activated and row["low"] <= activation_level:
                     pos.activated = True
                     pos.activation_time = ts
-                    pos.trail_stop = min(
-                        pos.initial_stop,
-                        float(row["ema120"]),
-                    )
+                    pos.trail_stop = min(pos.initial_stop, float(row["ema120"]))
                 elif pos.activated:
-                    pos.trail_stop = min(
-                        float(pos.trail_stop),
-                        float(row["ema120"]),
-                    )
+                    pos.trail_stop = min(float(pos.trail_stop), float(row["ema120"]))
 
+            # Never open another position while one is active.
             continue
 
-        # --------------------------------------------------------------
-        # First NY opening candle: 09:30 -> 09:35 ET.
-        # Direction is determined by its CLOSE vs EMA12.
-        # ENTRY is exactly at 09:35 ET using that candle's CLOSE.
-        # --------------------------------------------------------------
+        # ------------------------------------------------------------------
+        # Entry: first complete M5 bar of the NY session.
+        # ------------------------------------------------------------------
         if ts.hour != NY_OPEN_HOUR or ts.minute != NY_OPEN_MINUTE:
             continue
 
         session = row["session_date"]
-
         if session in sessions_with_entry:
             continue
 
+        # Entry is at the CLOSE of the opening 09:30-09:35 M5 candle.
+        # No second candle is waited for.
         if not np.isfinite(row["ema12"]) or not np.isfinite(row["ema120"]):
             continue
-
         if not np.isfinite(row["atr"]) or row["atr"] <= 0:
             continue
 
@@ -660,23 +634,20 @@ def run_strategy(m5: pd.DataFrame, atr_period: int | None = None, verbose: bool 
         else:
             continue
 
-        # IMPORTANT: close of the opening candle, not next bar open.
         entry = float(row["close"])
-        entry_time = ts + pd.Timedelta(minutes=5)
-
         risk = float(ATR_MULTIPLIER * row["atr"])
 
         if risk <= 0 or not np.isfinite(risk):
             continue
 
-        initial_stop = (
-            entry - risk if side == "LONG"
-            else entry + risk
-        )
+        if side == "LONG":
+            initial_stop = entry - risk
+        else:
+            initial_stop = entry + risk
 
         pos = Position(
             side=side,
-            entry_time=entry_time,
+            entry_time=ts,
             entry_price=entry,
             risk_points=risk,
             initial_stop=initial_stop,
@@ -684,48 +655,35 @@ def run_strategy(m5: pd.DataFrame, atr_period: int | None = None, verbose: bool 
             signal_ema12=float(row["ema12"]),
             signal_ema120=float(row["ema120"]),
             signal_atr=float(row["atr"]),
-            signal_hmm_state=(
-                float(row["hmm_state"])
-                if pd.notna(row["hmm_state"])
-                else np.nan
-            ),
-            signal_vol_percentile=(
-                float(row["vol_percentile"])
-                if pd.notna(row["vol_percentile"])
-                else np.nan
-            ),
+            signal_hmm_state=float(row["hmm_state"])
+            if pd.notna(row["hmm_state"])
+            else np.nan,
+            signal_vol_percentile=float(row["vol_percentile"])
+            if pd.notna(row["vol_percentile"])
+            else np.nan,
             signal_vol_bucket=str(row["vol_bucket"]),
         )
-
         sessions_with_entry.add(session)
 
+    # Close any remaining open trade at the last available M5 close.
     if pos is not None:
         last = x.iloc[-1]
         trades.append(
             finalize_trade(
-                pos,
-                last["timestamp_et"],
-                float(last["close"]),
-                "END_OF_DATA",
+                pos, last["timestamp_et"], float(last["close"]), "END_OF_DATA"
             )
         )
 
     out = pd.DataFrame(trades)
-
     if out.empty:
         raise RuntimeError("Session Momentum produced zero trades.")
 
-    out["signal_timestamp"] = pd.to_datetime(
-        out["signal_timestamp"], utc=True
-    )
-    out["entry_timestamp"] = pd.to_datetime(
-        out["entry_timestamp"], utc=True
-    )
-    out["exit_timestamp"] = pd.to_datetime(
-        out["exit_timestamp"], utc=True
-    )
+    out["signal_timestamp"] = pd.to_datetime(out["signal_timestamp"], utc=True)
+    out["entry_timestamp"] = pd.to_datetime(out["entry_timestamp"], utc=True)
+    out["exit_timestamp"] = pd.to_datetime(out["exit_timestamp"], utc=True)
+    out = out.sort_values("entry_timestamp").reset_index(drop=True)
 
-    return out.sort_values("entry_timestamp").reset_index(drop=True)
+    return out
 
 
 # =============================================================================
@@ -758,7 +716,9 @@ def metrics(trades: pd.DataFrame, label: str) -> dict:
         "max_drawdown_R": max_drawdown(eq),
         "average_win_R": wins.mean() if not wins.empty else np.nan,
         "average_loss_R": losses.mean() if not losses.empty else np.nan,
-        "payoff_ratio": wins.mean() / abs(losses.mean()) if not wins.empty and not losses.empty else np.nan,
+        "payoff_ratio": wins.mean() / abs(losses.mean())
+        if not wins.empty and not losses.empty
+        else np.nan,
         "t_stat": t_stat(r),
         "daily_sharpe": daily_sharpe(trades),
         "daily_sortino": daily_sortino(trades),
@@ -838,141 +798,162 @@ def max_drawdown_pct_compounded(trades: pd.DataFrame, risk_pct: float = 0.015) -
 
 
 # =============================================================================
-# REPORTING
+# ATR / OPENING-CANDLE AUDIT
 # =============================================================================
 
 
-def print_metrics_table(df: pd.DataFrame) -> None:
-    print(df.to_string(index=False, float_format=lambda x: f"{x:.6f}"))
-
-
-def opening_candle_audit(m5: pd.DataFrame) -> pd.DataFrame:
-    banner("OPENING-CANDLE AUDIT")
-
-    sessions = m5["session_date"].nunique()
-    opening = m5.loc[
-        (m5["timestamp_et"].dt.hour == NY_OPEN_HOUR)
-        & (m5["timestamp_et"].dt.minute == NY_OPEN_MINUTE)
+def audit_opening_candles(m5: pd.DataFrame) -> pd.DataFrame:
+    """Audit that every session has the canonical NY 09:30 opening bar."""
+    x = m5.copy()
+    x["session_date"] = x["timestamp_et"].dt.date
+    opening = x.loc[
+        (x["timestamp_et"].dt.hour == 9) & (x["timestamp_et"].dt.minute == 30)
     ].copy()
 
-    bad = opening.loc[
-        ~opening["timestamp_et"].dt.minute.eq(NY_OPEN_MINUTE)
-    ]
+    counts = (
+        x.groupby("session_date")["timestamp_et"]
+        .apply(lambda s: int(((s.dt.hour == 9) & (s.dt.minute == 30)).sum()))
+        .rename("opening_bar_count")
+        .reset_index()
+    )
 
+    print("\n" + "=" * 100)
+    print("OPENING-CANDLE AUDIT")
+    print("=" * 100)
     print("Expected signal candle: 09:30–09:35 America/New_York")
-    print("Expected entry time   : 09:35 America/New_York")
-    print("Expected entry price  : CLOSE of 09:30–09:35 opening candle")
-    print(f"Sessions in M5 dataset: {sessions:,}")
-    print(f"Sessions with 09:30 bar: {opening['session_date'].nunique():,}")
-    print(
-        f"Sessions without 09:30 bar: "
-        f"{sessions - opening['session_date'].nunique():,}"
-    )
+    print("Expected entry candle : 09:35–09:40 America/New_York")
+    print(f"Sessions in M5 dataset: {len(counts):,}")
+    print(f"Sessions with 09:30 bar: {(counts['opening_bar_count'] == 1).sum():,}")
+    print(f"Sessions without 09:30 bar: {(counts['opening_bar_count'] != 1).sum():,}")
     print(f"09:30 bars found: {len(opening):,}")
-    print(f"Bad opening minute labels: {len(bad):,}")
 
-    audit = pd.DataFrame(
-        {
-            "metric": [
-                "sessions",
-                "sessions_with_0930",
-                "sessions_without_0930",
-                "opening_bars",
-                "bad_opening_minute_labels",
-            ],
-            "value": [
-                sessions,
-                opening["session_date"].nunique(),
-                sessions - opening["session_date"].nunique(),
-                len(opening),
-                len(bad),
-            ],
-        }
+    if not opening.empty:
+        bad_minutes = opening["timestamp_et"].dt.minute.ne(30).sum()
+        print(f"Bad opening minute labels: {bad_minutes:,}")
+
+    counts.to_csv(
+        RESULTS_ROOT / "parameter_audit" / "opening_candle_audit.csv",
+        index=False,
     )
-    return audit
+    return counts
 
 
-def run_atr_audit(m5: pd.DataFrame) -> pd.DataFrame:
-    banner("ATR PERIOD AUDIT")
-    print(f"Periods tested: {ATR_AUDIT_PERIODS}")
-    print(
-        "Opening candle fixed at 09:30–09:35 ET; "
-        "entry = 09:35 ET close of opening candle."
-    )
-    print(
-        "HMM/VOL context and EMA12/EMA120 are computed ONCE and reused "
-        "across all ATR periods."
-    )
+def run_atr_period_audit(
+    m5_context: pd.DataFrame,
+) -> pd.DataFrame:
+    """Fast ATR audit.
 
+    Expensive work (Databento load, RTH filtering, M5 construction, HMM/VOL
+    context, EMA series and True Range) is performed once. Each ATR period only
+    recomputes the rolling Wilder ATR and runs the chronological trade engine.
+    """
+    global ATR_PERIOD
+
+    audit_dir = RESULTS_ROOT / "parameter_audit"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+
+    periods = list(ATR_AUDIT_PERIODS)
     rows = []
 
-    for period in ATR_AUDIT_PERIODS:
-        print(f"\nRunning ATR({period}) ...", flush=True)
+    print("\n" + "=" * 100)
+    print("FAST ATR PERIOD AUDIT")
+    print("=" * 100)
+    print(f"Periods tested: {periods}")
+    print("Opening candle: 09:30–09:35 ET")
+    print("Entry: CLOSE of opening candle at 09:35 ET")
+    print("Context/HMM/VOL is built ONCE and reused for all ATR periods.")
 
-        trades = run_strategy(
-            m5,
-            atr_period=period,
-            verbose=False,
+    # Precompute everything independent of ATR period.
+    base = m5_context.copy().sort_values("timestamp_et").reset_index(drop=True)
+    base["ema12"] = base["close"].ewm(span=EMA_SIGNAL, adjust=False).mean()
+    base["ema120"] = base["close"].ewm(span=EMA_TRAIL, adjust=False).mean()
+    prev_close = base["close"].shift(1)
+    base["true_range"] = pd.concat(
+        [
+            base["high"] - base["low"],
+            (base["high"] - prev_close).abs(),
+            (base["low"] - prev_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+
+    for n, period in enumerate(periods, 1):
+        print(f"\n[{n}/{len(periods)}] ATR {period} ...", flush=True)
+        ATR_PERIOD = period
+
+        x = base.copy()
+        x["atr"] = (
+            x["true_range"]
+            .ewm(
+                alpha=1.0 / period,
+                adjust=False,
+                min_periods=period,
+            )
+            .mean()
         )
 
+        trades = run_strategy(x)
         trades = trades.loc[
-            trades["signal_timestamp"]
-            >= ANALYSIS_START.tz_convert("UTC")
+            trades["signal_timestamp"] >= ANALYSIS_START.tz_convert("UTC")
         ].copy()
-
+        trades = trades.sort_values("entry_timestamp").reset_index(drop=True)
         trades["sample"] = np.where(
-            trades["signal_timestamp"]
-            <= IS_END.tz_convert("UTC"),
+            trades["signal_timestamp"] <= IS_END.tz_convert("UTC"),
             "IS",
             "OOS",
         )
 
         full = metrics(trades, "FULL")
-        is_m = metrics(
-            trades.loc[trades["sample"].eq("IS")],
-            "IS",
-        )
-        oos_m = metrics(
-            trades.loc[trades["sample"].eq("OOS")],
-            "OOS",
-        )
+        is_m = metrics(trades.loc[trades["sample"].eq("IS")], "IS")
+        oos_m = metrics(trades.loc[trades["sample"].eq("OOS")], "OOS")
+        oos_trades = trades.loc[trades["sample"].eq("OOS")]
 
         rows.append(
             {
                 "atr_period": period,
-
-                "trades": full["trades"],
-                "total_R": full["total_R"],
-                "expectancy_R": full["expectancy_R"],
-                "win_rate": full["win_rate"],
-                "profit_factor": full["profit_factor"],
-                "max_drawdown_R": full["max_drawdown_R"],
-                "daily_sharpe": full["daily_sharpe"],
-                "daily_sortino": full["daily_sortino"],
-                "t_stat": full["t_stat"],
-
-                "is_trades": is_m["trades"],
-                "is_total_R": is_m["total_R"],
-                "is_expectancy_R": is_m["expectancy_R"],
-                "is_win_rate": is_m["win_rate"],
-                "is_profit_factor": is_m["profit_factor"],
-
-                "oos_trades": oos_m["trades"],
-                "oos_total_R": oos_m["total_R"],
-                "oos_expectancy_R": oos_m["expectancy_R"],
-                "oos_win_rate": oos_m["win_rate"],
-                "oos_profit_factor": oos_m["profit_factor"],
-                "oos_max_drawdown_R": oos_m["max_drawdown_R"],
-                "oos_daily_sharpe": oos_m["daily_sharpe"],
-                "oos_t_stat": oos_m["t_stat"],
+                "trades": full.get("trades"),
+                "total_R": full.get("total_R"),
+                "expectancy_R": full.get("expectancy_R"),
+                "win_rate": full.get("win_rate"),
+                "profit_factor": full.get("profit_factor"),
+                "max_drawdown_R": full.get("max_drawdown_R"),
+                "daily_sharpe": full.get("daily_sharpe"),
+                "daily_sortino": full.get("daily_sortino"),
+                "t_stat": full.get("t_stat"),
+                "compound_return_pct": compound_return_pct(trades),
+                "compound_dd_pct": max_drawdown_pct_compounded(trades),
+                "is_trades": is_m.get("trades"),
+                "is_pf": is_m.get("profit_factor"),
+                "is_expectancy_R": is_m.get("expectancy_R"),
+                "is_win_rate": is_m.get("win_rate"),
+                "oos_trades": oos_m.get("trades"),
+                "oos_pf": oos_m.get("profit_factor"),
+                "oos_expectancy_R": oos_m.get("expectancy_R"),
+                "oos_win_rate": oos_m.get("win_rate"),
+                "oos_max_drawdown_R": oos_m.get("max_drawdown_R"),
+                "oos_sharpe": oos_m.get("daily_sharpe"),
+                "oos_t_stat": oos_m.get("t_stat"),
+                "oos_compound_return_pct": compound_return_pct(oos_trades),
             }
         )
 
-    result = pd.DataFrame(rows)
+        print(
+            f"[DONE] ATR {period:>2} | "
+            f"trades={full.get('trades', 0):>4} | "
+            f"PF={full.get('profit_factor', np.nan):.3f} | "
+            f"Exp={full.get('expectancy_R', np.nan):+.4f}R | "
+            f"OOS PF={oos_m.get('profit_factor', np.nan):.3f} | "
+            f"OOS Exp={oos_m.get('expectancy_R', np.nan):+.4f}R",
+            flush=True,
+        )
 
-    print("\n" + "=" * 140)
+    ATR_PERIOD = 14
+    result = pd.DataFrame(rows)
+    result.to_csv(audit_dir / "atr_period_audit.csv", index=False)
+
+    print("\n" + "=" * 100)
     print("ATR AUDIT — FULL SAMPLE")
-    print("=" * 140)
+    print("=" * 100)
     print(
         result[
             [
@@ -985,132 +966,313 @@ def run_atr_audit(m5: pd.DataFrame) -> pd.DataFrame:
                 "max_drawdown_R",
                 "daily_sharpe",
             ]
-        ].to_string(
-            index=False,
-            float_format=lambda x: f"{x:.4f}",
-        )
+        ].to_string(index=False, float_format=lambda x: f"{x:.4f}")
     )
 
-    print("\n" + "=" * 140)
+    print("\n" + "=" * 100)
     print("ATR AUDIT — OOS")
-    print("=" * 140)
+    print("=" * 100)
     print(
         result[
             [
                 "atr_period",
                 "oos_trades",
-                "oos_total_R",
+                "oos_pf",
                 "oos_expectancy_R",
                 "oos_win_rate",
-                "oos_profit_factor",
                 "oos_max_drawdown_R",
-                "oos_daily_sharpe",
+                "oos_sharpe",
                 "oos_t_stat",
             ]
-        ].to_string(
-            index=False,
-            float_format=lambda x: f"{x:.4f}",
-        )
+        ].to_string(index=False, float_format=lambda x: f"{x:.4f}")
     )
 
-    outdir = RESULTS_ROOT / "parameter_audit"
-    outdir.mkdir(parents=True, exist_ok=True)
-
-    result.to_csv(
-        outdir / "atr_period_audit.csv",
-        index=False,
-    )
-
-    print(f"\nSaved ATR audit: {outdir / 'atr_period_audit.csv'}")
-
+    print(f"\nSaved: {audit_dir / 'atr_period_audit.csv'}")
     return result
 
 
-def main() -> None:
-    banner("SESSION MOMENTUM — ATR / OPENING-CANDLE AUDIT")
+# =============================================================================
+# REPORTING
+# =============================================================================
 
+
+def print_metrics_table(df: pd.DataFrame) -> None:
+    print(df.to_string(index=False, float_format=lambda x: f"{x:.6f}"))
+
+
+def main() -> None:
+    global ATR_PERIOD
+    banner("SESSION MOMENTUM — BASELINE RESEARCH")
     print(f"Project root: {ROOT}")
     print(f"Analysis start: {ANALYSIS_START}")
     print(f"IS end:         {IS_END}")
-    print(f"ATR periods:    {ATR_AUDIT_PERIODS}")
+    print(f"ATR period:     {ATR_PERIOD} [PROVISIONAL]")
     print(f"ATR multiplier: {ATR_MULTIPLIER}")
     print(f"EMA signal:     {EMA_SIGNAL}")
     print(f"EMA trail:      {EMA_TRAIL}")
     print(f"Trail trigger:  +{TRAIL_ACTIVATION_R}R")
-    print("Opening candle: 09:30–09:35 ET")
-    print("Entry:          09:35 ET close of opening candle")
-
-    # ==============================================================
-    # EXPENSIVE STEPS — EACH RUNS ONLY ONCE
-    # ==============================================================
 
     rth = load_market()
     m5 = resample_m5(rth)
-
-    opening_audit = opening_candle_audit(m5)
-
-    # Compute EMA / TR / ALL ATR PERIODS once.
-    m5 = add_indicators(m5)
-
-    # Compute HMM/VOL context once.
     events, _ = load_context_sources()
+
+    # Audit opening-candle definition on the full M5 dataset before filtering.
+    audit_dir = RESULTS_ROOT / "parameter_audit"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+    audit_opening_candles(m5)
+
+    # Build expensive causal context ONCE. The ATR audit reuses this exact
+    # context for every period; only the ATR rolling calculation changes.
+    ATR_PERIOD = 14
+    m5 = add_indicators(m5)
     m5 = build_m5_context(m5, events)
 
-    m5 = m5.loc[
-        m5["timestamp_et"] >= ANALYSIS_START
-    ].copy().reset_index(drop=True)
+    # Run the ATR reconstruction audit using the exact same strategy engine.
+    # Keep the opening candle fixed at 09:30 ET; only ATR period varies.
+    m5_audit = (
+        m5.loc[m5["timestamp_et"] >= ANALYSIS_START].copy().reset_index(drop=True)
+    )
+    run_atr_period_audit(m5_audit)
 
-    # ==============================================================
-    # CHEAP STEP — 10 STRATEGY RUNS
-    # ==============================================================
+    # Restore baseline ATR for the final baseline report.
+    ATR_PERIOD = 14
 
-    atr_results = run_atr_audit(m5)
+    # We only use the requested 2020+ sample for the main comparison because
+    # the reference screenshot reports 2020-2026.
+    m5 = m5.loc[m5["timestamp_et"] >= ANALYSIS_START].copy().reset_index(drop=True)
 
-    # ==============================================================
-    # BASELINE = ATR(14)
-    # ==============================================================
+    trades = run_strategy(m5)
 
-    baseline = atr_results.loc[
-        atr_results["atr_period"].eq(ATR_PERIOD)
-    ]
+    # Remove trades whose signal occurs before the analysis start. Normally
+    # none should remain because the M5 series was filtered first.
+    trades = trades.loc[
+        trades["signal_timestamp"] >= ANALYSIS_START.tz_convert("UTC")
+    ].copy()
+    trades = trades.sort_values("entry_timestamp").reset_index(drop=True)
 
-    if baseline.empty:
-        raise RuntimeError("Baseline ATR(14) result missing.")
+    # IS/OOS based on signal timestamp.
+    trades["sample"] = np.where(
+        trades["signal_timestamp"] <= IS_END.tz_convert("UTC"),
+        "IS",
+        "OOS",
+    )
+    trades["year"] = trades["entry_timestamp"].dt.year
+    trades["month"] = (
+        trades["entry_timestamp"]
+        .dt.tz_convert("America/New_York")
+        .dt.to_period("M")
+        .astype(str)
+    )
 
-    print("\n" + "=" * 100)
-    print("BASELINE ATR(14)")
-    print("=" * 100)
+    # -------------------------------------------------------------------------
+    # A) STRATEGY RESULT ANALYSIS
+    # -------------------------------------------------------------------------
+    banner("A. STRATEGY RESULT ANALYSIS")
+
+    overall = metrics(trades, "FULL")
+    is_trades = trades.loc[trades["sample"].eq("IS")]
+    oos_trades = trades.loc[trades["sample"].eq("OOS")]
+    is_m = metrics(is_trades, "IS")
+    oos_m = metrics(oos_trades, "OOS")
+
+    print("\nFULL")
+    print(pd.Series(overall).to_string())
+    print("\nIS")
+    print(pd.Series(is_m).to_string())
+    print("\nOOS")
+    print(pd.Series(oos_m).to_string())
+
+    overall_ref_return = compound_return_pct(trades)
+    overall_ref_dd = max_drawdown_pct_compounded(trades)
+    oos_ref_return = compound_return_pct(oos_trades)
+    oos_ref_dd = max_drawdown_pct_compounded(oos_trades)
+
+    reference_comparison = pd.DataFrame(
+        [
+            [
+                "total_trades",
+                REFERENCE["total_trades"],
+                len(trades),
+                len(trades) - REFERENCE["total_trades"],
+            ],
+            [
+                "overall_pf",
+                REFERENCE["overall_pf"],
+                overall["profit_factor"],
+                overall["profit_factor"] - REFERENCE["overall_pf"],
+            ],
+            [
+                "overall_win_rate",
+                REFERENCE["overall_win_rate"],
+                overall["win_rate"],
+                overall["win_rate"] - REFERENCE["overall_win_rate"],
+            ],
+            [
+                "overall_max_dd_pct",
+                REFERENCE["overall_max_dd_pct"],
+                abs(overall_ref_dd),
+                abs(overall_ref_dd) - REFERENCE["overall_max_dd_pct"],
+            ],
+            [
+                "overall_sharpe",
+                REFERENCE["overall_sharpe"],
+                overall["daily_sharpe"],
+                overall["daily_sharpe"] - REFERENCE["overall_sharpe"],
+            ],
+            [
+                "overall_net_return_pct",
+                REFERENCE["overall_net_return_pct"],
+                overall_ref_return,
+                overall_ref_return - REFERENCE["overall_net_return_pct"],
+            ],
+            [
+                "oos_pf",
+                REFERENCE["oos_pf"],
+                oos_m["profit_factor"],
+                oos_m["profit_factor"] - REFERENCE["oos_pf"],
+            ],
+            [
+                "oos_t_stat",
+                REFERENCE["oos_t_stat"],
+                oos_m["t_stat"],
+                oos_m["t_stat"] - REFERENCE["oos_t_stat"],
+            ],
+            [
+                "oos_win_rate",
+                REFERENCE["oos_win_rate"],
+                oos_m["win_rate"],
+                oos_m["win_rate"] - REFERENCE["oos_win_rate"],
+            ],
+            [
+                "oos_expectancy_R",
+                REFERENCE["oos_expectancy_r"],
+                oos_m["expectancy_R"],
+                oos_m["expectancy_R"] - REFERENCE["oos_expectancy_r"],
+            ],
+            [
+                "oos_net_return_pct",
+                REFERENCE["oos_net_return_pct"],
+                oos_ref_return,
+                oos_ref_return - REFERENCE["oos_net_return_pct"],
+            ],
+        ],
+        columns=["metric", "reference_screenshot", "our_reproduction", "difference"],
+    )
+
+    print("\nREFERENCE METRIC COMPARISON")
     print(
-        baseline.to_string(
-            index=False,
-            float_format=lambda x: f"{x:.6f}",
-        )
+        reference_comparison.to_string(index=False, float_format=lambda x: f"{x:.6f}")
     )
 
-    # ==============================================================
-    # OPENING CANDLE AUDIT OUTPUT
-    # ==============================================================
+    by_side = group_metrics(trades, ["side"])
+    by_sample_side = group_metrics(trades, ["sample", "side"])
+    by_year = group_metrics(trades, ["year"])
+    by_month = group_metrics(trades, ["month"])
 
-    outdir = RESULTS_ROOT / "parameter_audit"
-    outdir.mkdir(parents=True, exist_ok=True)
+    # -------------------------------------------------------------------------
+    # B) CONTEXT ANALYSIS — HMM / VOL REGIME / SIDE
+    # -------------------------------------------------------------------------
+    banner("B. HMM + VOLATILITY REGIME ANALYSIS")
 
-    opening_audit.to_csv(
-        outdir / "opening_candle_audit.csv",
-        index=False,
+    # Ensure context labels are readable and stable.
+    trades["hmm_state"] = pd.to_numeric(trades["hmm_state"], errors="coerce").astype(
+        "Int64"
     )
+    trades["vol_bucket"] = trades["vol_bucket"].astype(str)
+
+    by_hmm = group_metrics(trades, ["hmm_state"])
+    by_vol = group_metrics(trades, ["vol_bucket"])
+    by_hmm_vol = group_metrics(trades, ["hmm_state", "vol_bucket"])
+    by_side_hmm = group_metrics(trades, ["side", "hmm_state"])
+    by_side_vol = group_metrics(trades, ["side", "vol_bucket"])
+    by_sample_hmm = group_metrics(trades, ["sample", "hmm_state"])
+    by_sample_vol = group_metrics(trades, ["sample", "vol_bucket"])
+
+    print("\nBY SIDE")
+    print_metrics_table(by_side)
+    print("\nBY HMM STATE")
+    print_metrics_table(by_hmm)
+    print("\nBY VOLATILITY REGIME")
+    print_metrics_table(by_vol)
+    print("\nBY HMM STATE x VOLATILITY REGIME")
+    print_metrics_table(by_hmm_vol)
+    print("\nBY SIDE x HMM STATE")
+    print_metrics_table(by_side_hmm)
+    print("\nBY SIDE x VOLATILITY REGIME")
+    print_metrics_table(by_side_vol)
+
+    # -------------------------------------------------------------------------
+    # Save strategy results separately from context analysis.
+    # -------------------------------------------------------------------------
+    trades.to_csv(STRATEGY_DIR / "session_momentum_trades.csv", index=False)
+    pd.DataFrame([overall, is_m, oos_m]).to_csv(
+        STRATEGY_DIR / "session_momentum_metrics.csv", index=False
+    )
+    by_side.to_csv(STRATEGY_DIR / "session_momentum_by_side.csv", index=False)
+    by_sample_side.to_csv(
+        STRATEGY_DIR / "session_momentum_by_sample_side.csv", index=False
+    )
+    by_year.to_csv(STRATEGY_DIR / "session_momentum_by_year.csv", index=False)
+    by_month.to_csv(STRATEGY_DIR / "session_momentum_by_month.csv", index=False)
+    reference_comparison.to_csv(
+        STRATEGY_DIR / "session_momentum_reference_comparison.csv", index=False
+    )
+
+    by_hmm.to_csv(CONTEXT_DIR / "session_momentum_by_hmm_state.csv", index=False)
+    by_vol.to_csv(CONTEXT_DIR / "session_momentum_by_vol_regime.csv", index=False)
+    by_hmm_vol.to_csv(CONTEXT_DIR / "session_momentum_by_hmm_x_vol.csv", index=False)
+    by_side_hmm.to_csv(CONTEXT_DIR / "session_momentum_by_side_x_hmm.csv", index=False)
+    by_side_vol.to_csv(CONTEXT_DIR / "session_momentum_by_side_x_vol.csv", index=False)
+    by_sample_hmm.to_csv(
+        CONTEXT_DIR / "session_momentum_by_sample_x_hmm.csv", index=False
+    )
+    by_sample_vol.to_csv(
+        CONTEXT_DIR / "session_momentum_by_sample_x_vol.csv", index=False
+    )
+
+    # A compact configuration file makes the assumptions auditable.
+    config = pd.DataFrame(
+        [
+            ["ema_signal", EMA_SIGNAL, "source screenshot"],
+            ["ema_trail", EMA_TRAIL, "source screenshot"],
+            ["atr_period", ATR_PERIOD, "PROVISIONAL — screenshot unspecified"],
+            ["atr_multiplier", ATR_MULTIPLIER, "source screenshot"],
+            ["trail_activation_R", TRAIL_ACTIVATION_R, "source screenshot"],
+            [
+                "entry",
+                "09:35 close of opening M5 candle",
+                "user-confirmed implementation",
+            ],
+            ["atr_formula", "Wilder/RMA", "explicit implementation assumption"],
+            ["ema_series", "RTH M5", "explicit implementation assumption"],
+            [
+                "trail_timing",
+                "next bar after activation",
+                "explicit no-lookahead assumption",
+            ],
+            ["session_close", "no forced close", "explicit implementation assumption"],
+        ],
+        columns=["parameter", "value", "status"],
+    )
+    config.to_csv(STRATEGY_DIR / "session_momentum_config.csv", index=False)
 
     banner("FINAL AUDIT")
-    print("Opening candle: 09:30–09:35 ET")
-    print("Entry:          09:35 ET CLOSE")
-    print(f"ATR periods:    {ATR_AUDIT_PERIODS}")
-    print(
-        "HMM/VOL context: computed once and reused for every ATR period."
-    )
-    print(
-        "No robustness, Monte Carlo, or automatic parameter selection "
-        "was performed."
-    )
-    print(f"\nResults: {outdir}")
+    print(f"Trades:              {len(trades):,}")
+    print(f"LONG:                {(trades['side'] == 'LONG').sum():,}")
+    print(f"SHORT:               {(trades['side'] == 'SHORT').sum():,}")
+    print(f"Total R:             {trades['r'].sum():+.4f}R")
+    print(f"Expectancy:          {trades['r'].mean():+.6f}R")
+    print(f"Profit factor:       {profit_factor(trades['r']):.4f}")
+    print(f"Win rate:            {(trades['r'] > 0).mean():.4%}")
+    print(f"Max DD:              {max_drawdown(trades['r'].cumsum()):+.4f}R")
+    print(f"Compounded @ 1.5%:   {overall_ref_return:+.2f}%")
+    print(f"Compounded max DD:   {overall_ref_dd:+.2f}%")
+    print(f"OOS compounded:      {oos_ref_return:+.2f}%")
+    print(f"OOS max DD:          {oos_ref_dd:+.2f}%")
+    print(f"\nStrategy results: {STRATEGY_DIR}")
+    print(f"Context analysis: {CONTEXT_DIR}")
+    print("\nNO ROBUSTNESS TESTING WAS RUN IN THIS SCRIPT.")
+    print("Next stage after auditing this baseline: robustness / stress tests.")
 
 
 if __name__ == "__main__":
