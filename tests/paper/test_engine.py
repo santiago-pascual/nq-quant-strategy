@@ -151,6 +151,7 @@ def make_engine(
     tmp_path,
     *,
     strategies=None,
+    max_contracts=1,
 ):
     logger = PaperEventLogger(
         tmp_path / "paper.jsonl",
@@ -167,7 +168,7 @@ def make_engine(
             max_daily_loss=500.0,
             max_concurrent_positions=2,
             max_daily_trades=10,
-            max_contracts=20,
+            max_contracts=max_contracts,
         )
     )
 
@@ -584,7 +585,7 @@ def test_full_paper_lifecycle_enter_exit(
     # ==============================================================
 
     exit_fill = broker.process_fill(
-        broker_order_id=exit_broker_order.order_id,
+        broker_order_id=exit_broker_order.broker_order_id,
         quantity=1,
         price=101.0,
     )
@@ -612,6 +613,7 @@ def test_partial_entry_fill_then_update_then_exit(
     engine, execution, broker, logger = make_engine(
         tmp_path,
         strategies=[strategy],
+        max_contracts=2,
     )
 
     engine.connect()

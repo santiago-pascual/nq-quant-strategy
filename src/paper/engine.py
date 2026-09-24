@@ -797,7 +797,43 @@ class PaperTradingEngine:
                     market_data=self._last_market_data,
                 )
 
-            # Determine whether the broker order is now completely filled.
+                # --------------------------------------------------------------
+            # Risk / portfolio bookkeeping follows ACTUAL fills.
+            #
+            # This is intentionally not delayed until BrokerOrderStatus.FILLED.
+            # A partial fill creates real execution exposure and therefore
+            # must create corresponding risk/conflict exposure immediately.
+            # --------------------------------------------------------------
+
+            risk_result = self._pending_risk_results.get(
+                broker_fill.broker_order_id,
+            )
+
+            entry_request = self._pending_entry_requests.get(
+                broker_fill.broker_order_id,
+            )
+
+            if risk_result is None:
+                raise RuntimeError("Missing pending risk result for entry fill")
+
+            if entry_request is None:
+                raise RuntimeError("Missing pending portfolio entry for entry fill")
+
+            # Register exactly the quantity that was actually filled.
+            self.risk.register_entry_fill(
+                risk_result,
+                fill_quantity=broker_fill.quantity,
+            )
+
+            # Portfolio conflict is binary at strategy-position level:
+            # the first actual fill occupies the strategy slot.
+            if position_before is None:
+                self.conflict.register_entry(
+                    entry_request,
+                )
+
+            # Once the broker order is completely filled, no pending
+            # authorization state is needed anymore.
             broker_order = self.broker.get_order(
                 broker_fill.broker_order_id,
             )
@@ -808,34 +844,14 @@ class PaperTradingEngine:
             from src.broker.types import BrokerOrderStatus
 
             if broker_order.status is BrokerOrderStatus.FILLED:
-                risk_result = self._pending_risk_results.pop(
+                self._pending_risk_results.pop(
                     broker_fill.broker_order_id,
                     None,
                 )
 
-                entry_request = self._pending_entry_requests.pop(
+                self._pending_entry_requests.pop(
                     broker_fill.broker_order_id,
                     None,
-                )
-
-                if risk_result is None:
-                    raise RuntimeError(
-                        "Missing pending risk result for fully filled entry"
-                    )
-
-                if entry_request is None:
-                    raise RuntimeError(
-                        "Missing pending portfolio entry for fully filled entry"
-                    )
-
-                # Risk becomes active only after complete fill.
-                self.risk.register_entry(
-                    risk_result,
-                )
-
-                # Portfolio position becomes active only after complete fill.
-                self.conflict.register_entry(
-                    entry_request,
                 )
 
             return execution_fill
@@ -886,20 +902,22 @@ class PaperTradingEngine:
                 price_difference * position_before.quantity * self.config.point_value
             )
 
-            # Risk release.
-            self.risk.register_exit(
+            # Risk release follows the actual quantity that was exited.
+            self.risk.register_exit_fill(
                 strategy_name,
-                realized_pnl,
+                fill_quantity=position_before.quantity,
+                realized_pnl=realized_pnl,
             )
 
-            # Portfolio conflict release.
+            # The execution position is now flat, so the portfolio slot
+            # can be released.
             self.conflict.register_exit(
                 strategy_name,
             )
 
             # Strategy lifecycle reset.
             self.lifecycle.notify_exit(
-                strategy_name,
+                strategy_name=strategy_name,
             )
 
             return execution_fill

@@ -9,16 +9,30 @@ from .types import RiskDecision, RiskLimits, RiskRequest, RiskResult
 @dataclass
 class _OpenPosition:
     strategy_name: str
-    risk: float
+    risk_per_contract: float
+    quantity: int
+    total_risk: float
 
 
 @dataclass
 class RiskEngine:
-    """Deterministic pre-trade risk engine.
+    """Deterministic pre-trade and execution-aware risk engine.
 
-    This layer does not generate signals, submit orders, manage fills,
-    or calculate strategy stops. It only validates a proposed trade,
-    sizes it, and tracks aggregate risk/account limits.
+    The engine has two distinct responsibilities:
+
+    1. Pre-trade:
+       - validate a proposed position
+       - calculate authorized quantity
+       - enforce account-level limits
+
+    2. Execution bookkeeping:
+       - track actual filled exposure
+       - support partial entry fills
+       - support partial exit fills
+       - release risk only as exposure is actually reduced
+
+    The engine does not generate signals, calculate strategy stops,
+    or select production risk-policy values.
     """
 
     limits: RiskLimits
@@ -47,22 +61,22 @@ class RiskEngine:
 
     @property
     def open_risk(self) -> float:
-        return sum(position.risk for position in self._open_positions.values())
+        return sum(position.total_risk for position in self._open_positions.values())
 
-    def evaluate(self, request: RiskRequest, *, trading_day: date) -> RiskResult:
+    def evaluate(
+        self,
+        request: RiskRequest,
+        *,
+        trading_day: date,
+    ) -> RiskResult:
         """Size and authorize a proposed position.
 
-        Quantity is determined exclusively from the frozen risk limits
-        and the proposed entry/stop distance:
+        Quantity is determined exclusively from the configured risk limits
+        and proposed entry/stop distance.
 
-            risk_per_contract =
-                abs(entry - stop) * point_value
-
-            quantity =
-                floor(risk_per_trade / risk_per_contract)
-
-        No strategy performance data is used here.
+        Actual open exposure is registered later through execution fills.
         """
+
         self.reset_day(trading_day)
 
         if self._daily_realized_pnl <= -self.limits.max_daily_loss:
@@ -90,8 +104,7 @@ class RiskEngine:
             )
 
         risk_per_contract = (
-            abs(request.entry_price - request.stop_price)
-            * request.point_value
+            abs(request.entry_price - request.stop_price) * request.point_value
         )
 
         quantity = int(self.limits.risk_per_trade // risk_per_contract)
@@ -124,33 +137,135 @@ class RiskEngine:
             reason="risk checks passed",
         )
 
-    def register_entry(self, result: RiskResult) -> None:
-        """Register an approved position after execution confirms a fill."""
+    def register_entry_fill(
+        self,
+        result: RiskResult,
+        *,
+        fill_quantity: int,
+    ) -> None:
+        """Register actual filled entry exposure.
+
+        This method is intentionally fill-based rather than order-based.
+
+        Example:
+            authorized = 20
+            fill 1    -> risk exposure = 1 contract
+            fill 2    -> risk exposure = 2 contracts
+            ...
+            fill 20   -> risk exposure = 20 contracts
+
+        The daily trade count is incremented only when the first actual
+        entry fill creates the position.
+        """
+
         if not result.approved:
             raise ValueError("cannot register a rejected risk result")
 
-        if result.strategy_name in self._open_positions:
-            raise RuntimeError("strategy already has an open position")
+        if fill_quantity <= 0:
+            raise ValueError("fill_quantity must be positive")
 
-        if self.open_position_count >= self.limits.max_concurrent_positions:
-            raise RuntimeError("maximum concurrent positions reached")
+        position = self._open_positions.get(result.strategy_name)
 
-        if self.open_risk + result.total_risk > self.limits.max_total_risk:
+        if position is None:
+            if self.open_position_count >= self.limits.max_concurrent_positions:
+                raise RuntimeError("maximum concurrent positions reached")
+
+            if (
+                self.open_risk + (fill_quantity * result.risk_per_contract)
+                > self.limits.max_total_risk
+            ):
+                raise RuntimeError("maximum aggregate open risk reached")
+
+            if fill_quantity > result.quantity:
+                raise ValueError("entry fill exceeds risk-authorized quantity")
+
+            total_risk = fill_quantity * result.risk_per_contract
+
+            self._open_positions[result.strategy_name] = _OpenPosition(
+                strategy_name=result.strategy_name,
+                risk_per_contract=result.risk_per_contract,
+                quantity=fill_quantity,
+                total_risk=total_risk,
+            )
+
+            self._daily_trade_count += 1
+            return
+
+        if position.risk_per_contract != result.risk_per_contract:
+            raise RuntimeError("risk per contract changed during partial entry")
+
+        new_quantity = position.quantity + fill_quantity
+
+        if new_quantity > result.quantity:
+            raise ValueError("cumulative entry fills exceed risk-authorized quantity")
+
+        additional_risk = fill_quantity * result.risk_per_contract
+
+        if self.open_risk + additional_risk > self.limits.max_total_risk:
             raise RuntimeError("maximum aggregate open risk reached")
 
-        self._open_positions[result.strategy_name] = _OpenPosition(
-            strategy_name=result.strategy_name,
-            risk=result.total_risk,
-        )
-        self._daily_trade_count += 1
+        position.quantity = new_quantity
+        position.total_risk += additional_risk
 
-    def register_exit(self, strategy_name: str, realized_pnl: float) -> None:
-        """Remove an open position and record realized daily P&L."""
-        if strategy_name not in self._open_positions:
+    def register_exit_fill(
+        self,
+        strategy_name: str,
+        *,
+        fill_quantity: int,
+        realized_pnl: float = 0.0,
+    ) -> None:
+        """Reduce actual open exposure by an executed exit fill.
+
+        The realized P&L is accumulated only when the position becomes flat.
+        """
+
+        if fill_quantity <= 0:
+            raise ValueError("fill_quantity must be positive")
+
+        position = self._open_positions.get(strategy_name)
+
+        if position is None:
             raise RuntimeError("strategy has no open position")
 
-        del self._open_positions[strategy_name]
-        self._daily_realized_pnl += realized_pnl
+        if fill_quantity > position.quantity:
+            raise ValueError("exit fill exceeds current risk position quantity")
+
+        position.quantity -= fill_quantity
+        position.total_risk = position.quantity * position.risk_per_contract
+
+        if position.quantity == 0:
+            del self._open_positions[strategy_name]
+            self._daily_realized_pnl += realized_pnl
+
+    def register_entry(self, result: RiskResult) -> None:
+        """Backward-compatible full-fill registration.
+
+        Existing callers that operate in an all-or-nothing manner can still
+        register a completed position through this method.
+        """
+
+        self.register_entry_fill(
+            result,
+            fill_quantity=result.quantity,
+        )
+
+    def register_exit(
+        self,
+        strategy_name: str,
+        realized_pnl: float,
+    ) -> None:
+        """Backward-compatible full-position exit registration."""
+
+        position = self._open_positions.get(strategy_name)
+
+        if position is None:
+            raise RuntimeError("strategy has no open position")
+
+        self.register_exit_fill(
+            strategy_name,
+            fill_quantity=position.quantity,
+            realized_pnl=realized_pnl,
+        )
 
     def _reject(
         self,
