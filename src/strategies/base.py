@@ -79,6 +79,24 @@ class BaseStrategy(ABC):
             action=action,
         )
 
+    def get_risk_stop_price(
+        self,
+        *,
+        entry_price: float,
+        signal: StrategySignal,
+        market_data: Mapping[str, Any] | None = None,
+    ) -> float | None:
+        """
+        Return the strategy-defined protective stop price.
+
+        Strategies with explicit risk geometry should override this method.
+
+        Returning None means that the strategy does not provide a generic
+        protective stop through this interface.
+        """
+
+        return None
+
     def on_fill(
         self,
         *,

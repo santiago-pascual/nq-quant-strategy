@@ -5,160 +5,142 @@ from typing import Any
 
 from src.strategies.base import (
     BaseStrategy,
-    StrategyAction,
-    StrategyDecision,
     StrategySignal,
 )
-
-from .config import (
-    MRS2_CONFIG,
+from src.strategies.mean_reversion.config import (
+    FROZEN_CONFIGS,
+    MeanReversionCandidate,
     MeanReversionConfig,
 )
-from .context import MeanReversionContextBuilder
 
 
 class MeanReversionStrategy(BaseStrategy):
     """
-    Modular Mean Reversion strategy.
+    Production Mean Reversion strategy.
 
-    One instance represents one frozen research candidate.
+    The strategy is parameterized by one frozen candidate configuration.
 
-    The strategy consumes precomputed market context:
-        - HMM state
-        - volatility percentile
-        - z-score
-
-    It does not perform fitting, data loading, or research optimization.
+    Signal generation is intentionally limited to the strategy's entry
+    conditions. Risk geometry such as stop distance is exposed separately
+    through get_risk_stop_price().
     """
 
     def __init__(
         self,
-        config: MeanReversionConfig | None = None,
+        config: MeanReversionConfig,
     ) -> None:
-        """
-        Initialize the strategy.
-
-        If no configuration is supplied, MRS2 is used as the
-        default frozen candidate so the BaseStrategy contract
-        can instantiate the strategy without arguments.
-        """
-
-        self.config = config or MRS2_CONFIG
-        self._context_builder = MeanReversionContextBuilder()
+        self.config = config
 
     @property
     def name(self) -> str:
-        """Return the frozen candidate name."""
         return self.config.name
 
     @property
     def version(self) -> str:
-        """Return the strategy implementation version."""
-        return "1.0.0"
+        return "1.0"
 
-    def build_context(
-        self,
-        market_data: Mapping[str, Any],
-    ) -> dict[str, Any]:
-        """
-        Build the market context required by Mean Reversion.
-        """
-
-        return self._context_builder.build(market_data)
+    @property
+    def candidate_id(self) -> str:
+        return self.config.candidate_id
 
     def generate_signal(
         self,
         market_data: Mapping[str, Any],
     ) -> StrategySignal:
         """
-        Generate the frozen Mean Reversion entry signal.
+        Generate the Mean Reversion directional signal.
 
-        LONG:
-            zscore <= -zscore_threshold
+        MRS2:
+            SHORT
+            HMM state 2
+            volatility percentile [80, 100)
+            z-score >= +2.0
 
-        SHORT:
-            zscore >= +zscore_threshold
+        MRL1:
+            LONG
+            HMM state 1
+            volatility percentile [20, 40)
+            z-score <= -2.5
         """
 
-        context = self.build_context(market_data)
+        hmm_state = market_data.get("hmm_state")
+        vol_percentile = market_data.get("vol_percentile")
+        zscore = market_data.get("zscore")
 
-        hmm_state = context.get("hmm_state")
-        volatility_percentile = context.get("vol_percentile")
-        zscore = context.get("zscore")
-
-        # Required context must be present.
         if hmm_state is None:
             return StrategySignal.FLAT
 
-        if volatility_percentile is None:
+        if vol_percentile is None:
             return StrategySignal.FLAT
 
         if zscore is None:
             return StrategySignal.FLAT
 
-        # Reject boolean values explicitly.
-        # bool is a subclass of int in Python.
-        if isinstance(hmm_state, bool):
+        try:
+            hmm_state_int = int(hmm_state)
+            volatility = float(vol_percentile)
+            zscore_value = float(zscore)
+        except (TypeError, ValueError):
             return StrategySignal.FLAT
 
-        # HMM regime filter.
-        if int(hmm_state) != self.config.hmm_state:
-            return StrategySignal.FLAT
-
-        # Volatility percentile filter.
-        #
-        # Lower boundary is inclusive.
-        # Upper boundary is exclusive.
-        if not (
-            self.config.volatility_low
-            <= float(volatility_percentile)
-            < self.config.volatility_high
+        if (
+            self.config.candidate_id
+            == FROZEN_CONFIGS[MeanReversionCandidate.MRS2].candidate_id
         ):
-            return StrategySignal.FLAT
-
-        threshold = float(self.config.zscore_threshold)
-        current_zscore = float(zscore)
-
-        # Directional z-score condition.
-        if self.config.side == "LONG":
-            if current_zscore <= -threshold:
-                return StrategySignal.LONG
-
-        elif self.config.side == "SHORT":
-            if current_zscore >= threshold:
+            if (
+                hmm_state_int == self.config.hmm_state
+                and self.config.volatility_low
+                <= volatility
+                < self.config.volatility_high
+                and zscore_value >= self.config.zscore_threshold
+            ):
                 return StrategySignal.SHORT
 
-        else:
-            raise ValueError(f"Unknown Mean Reversion side: {self.config.side!r}")
+            return StrategySignal.FLAT
+
+        if (
+            self.config.candidate_id
+            == FROZEN_CONFIGS[MeanReversionCandidate.MRL1].candidate_id
+        ):
+            if (
+                hmm_state_int == self.config.hmm_state
+                and self.config.volatility_low
+                <= volatility
+                < self.config.volatility_high
+                and zscore_value <= -abs(self.config.zscore_threshold)
+            ):
+                return StrategySignal.LONG
+
+            return StrategySignal.FLAT
 
         return StrategySignal.FLAT
 
-    def evaluate(
+    def get_risk_stop_price(
         self,
-        market_data: Mapping[str, Any],
-    ) -> StrategyDecision:
+        *,
+        entry_price: float,
+        signal: StrategySignal,
+        market_data: Mapping[str, Any] | None = None,
+    ) -> float | None:
         """
-        Evaluate the frozen Mean Reversion candidate.
+        Calculate the protective stop from the frozen strategy geometry.
+
+        LONG:
+            stop = entry - stop_points
+
+        SHORT:
+            stop = entry + stop_points
         """
 
-        signal = self.generate_signal(market_data)
+        entry = float(entry_price)
+
+        if entry <= 0:
+            raise ValueError("entry_price must be positive.")
 
         if signal is StrategySignal.LONG:
-            return StrategyDecision(
-                signal=StrategySignal.LONG,
-                action=StrategyAction.ENTER,
-                reason=(f"{self.config.name} long entry conditions satisfied."),
-            )
+            return entry - self.config.stop_points
 
         if signal is StrategySignal.SHORT:
-            return StrategyDecision(
-                signal=StrategySignal.SHORT,
-                action=StrategyAction.ENTER,
-                reason=(f"{self.config.name} short entry conditions satisfied."),
-            )
+            return entry + self.config.stop_points
 
-        return StrategyDecision(
-            signal=StrategySignal.FLAT,
-            action=StrategyAction.HOLD,
-            reason=(f"{self.config.name} entry conditions not satisfied."),
-        )
+        return None

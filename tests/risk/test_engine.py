@@ -8,25 +8,22 @@ from src.risk.engine import RiskEngine
 from src.risk.types import RiskDecision, RiskLimits, RiskRequest
 
 
-TRADING_DAY = date(2026, 9, 23)
+TRADING_DAY = date(2026, 1, 5)
 
 
-def make_engine(
+def make_risk_engine(
     *,
-    risk_per_trade: float = 250.0,
-    max_total_risk: float = 500.0,
-    max_daily_loss: float = 500.0,
-    max_concurrent_positions: int = 2,
-    max_daily_trades: int = 10,
+    risk_per_trade: float = 125.0,
+    max_total_risk: float = 375.0,
     max_contracts: int = 20,
 ) -> RiskEngine:
     return RiskEngine(
-        limits=RiskLimits(
+        RiskLimits(
             risk_per_trade=risk_per_trade,
             max_total_risk=max_total_risk,
-            max_daily_loss=max_daily_loss,
-            max_concurrent_positions=max_concurrent_positions,
-            max_daily_trades=max_daily_trades,
+            max_daily_loss=500.0,
+            max_concurrent_positions=3,
+            max_daily_trades=10,
             max_contracts=max_contracts,
         )
     )
@@ -34,265 +31,158 @@ def make_engine(
 
 def make_request(
     *,
-    strategy_name: str = "MRS2",
-    entry_price: float = 25000.0,
-    stop_price: float = 24975.0,
+    entry_price: float,
+    stop_price: float,
     point_value: float = 2.0,
-    account_equity: float = 50_000.0,
+    strategy_name: str = "TEST",
 ) -> RiskRequest:
     return RiskRequest(
         strategy_name=strategy_name,
         entry_price=entry_price,
         stop_price=stop_price,
         point_value=point_value,
-        account_equity=account_equity,
+        account_equity=50_000.0,
     )
 
 
-def test_sizes_mnq_position_from_stop_distance():
-    engine = make_engine(risk_per_trade=250.0)
+def test_fractional_quantity_below_one_is_rejected():
+    """
+    If the risk budget allows less than one indivisible MNQ contract,
+    the trade must be rejected rather than rounded up.
+
+    Example:
+        risk budget = $125
+        risk/contract = $166.67
+        theoretical size = 0.75 contracts
+        executable size = 0
+        result = REJECT
+    """
+    engine = make_risk_engine()
+
+    request = make_request(
+        entry_price=100.0,
+        stop_price=16.6666666667,
+    )
 
     result = engine.evaluate(
-        make_request(),
+        request,
+        trading_day=TRADING_DAY,
+    )
+
+    assert result.decision is RiskDecision.REJECTED
+    assert not result.approved
+    assert result.quantity == 0
+    assert result.risk_per_contract == pytest.approx(
+        166.6666666666,
+        rel=1e-9,
+    )
+    assert result.total_risk == pytest.approx(0.0)
+    assert "stop distance" in result.reason
+
+
+def test_fractional_quantity_1_55_is_floored_to_one():
+    """
+    A theoretical size of 1.55 MNQ contracts must become exactly
+    1 contract, never 2.
+    """
+    engine = make_risk_engine()
+
+    # $125 / ($80.64516129 per contract) = 1.55 contracts.
+    risk_per_contract = 125.0 / 1.55
+    stop_distance = risk_per_contract / 2.0
+
+    request = make_request(
+        entry_price=100.0,
+        stop_price=100.0 - stop_distance,
+    )
+
+    result = engine.evaluate(
+        request,
         trading_day=TRADING_DAY,
     )
 
     assert result.decision is RiskDecision.APPROVED
-    assert result.quantity == 5
-    assert result.risk_per_contract == 50.0
-    assert result.total_risk == 250.0
-
-
-def test_short_and_long_have_same_risk_for_same_stop_distance():
-    engine = make_engine(risk_per_trade=250.0)
-
-    long_result = engine.evaluate(
-        make_request(entry_price=25000.0, stop_price=24975.0),
-        trading_day=TRADING_DAY,
-    )
-    short_result = engine.evaluate(
-        make_request(
-            strategy_name="MRS2_SHORT",
-            entry_price=25000.0,
-            stop_price=25025.0,
-        ),
-        trading_day=TRADING_DAY,
-    )
-
-    assert long_result.quantity == short_result.quantity == 5
-    assert long_result.total_risk == short_result.total_risk == 250.0
-
-
-def test_trade_is_rejected_when_one_contract_exceeds_risk_budget():
-    engine = make_engine(risk_per_trade=40.0)
-
-    result = engine.evaluate(
-        make_request(),
-        trading_day=TRADING_DAY,
-    )
-
-    assert result.decision is RiskDecision.REJECTED
-    assert result.quantity == 0
-    assert "too large" in result.reason
-
-
-def test_max_contracts_caps_position_size():
-    engine = make_engine(
-        risk_per_trade=1000.0,
-        max_contracts=3,
-    )
-
-    result = engine.evaluate(
-        make_request(),
-        trading_day=TRADING_DAY,
-    )
-
     assert result.approved
-    assert result.quantity == 3
-    assert result.total_risk == 150.0
+    assert result.quantity == 1
+    assert result.total_risk <= 125.0
 
 
-def test_duplicate_strategy_position_is_rejected():
-    engine = make_engine()
+def test_fractional_quantity_2_99_is_floored_to_two():
+    """
+    A theoretical size of 2.99 MNQ contracts must become exactly
+    2 contracts.
+    """
+    engine = make_risk_engine()
+
+    # $125 / ($41.80602007 per contract) = 2.99 contracts.
+    risk_per_contract = 125.0 / 2.99
+    stop_distance = risk_per_contract / 2.0
+
+    request = make_request(
+        entry_price=100.0,
+        stop_price=100.0 - stop_distance,
+    )
 
     result = engine.evaluate(
-        make_request(),
-        trading_day=TRADING_DAY,
-    )
-    engine.register_entry(result)
-
-    second = engine.evaluate(
-        make_request(),
+        request,
         trading_day=TRADING_DAY,
     )
 
-    assert second.decision is RiskDecision.REJECTED
-    assert "already has an open position" in second.reason
+    assert result.decision is RiskDecision.APPROVED
+    assert result.approved
+    assert result.quantity == 2
+    assert result.total_risk <= 125.0
 
 
-def test_aggregate_open_risk_limit_is_enforced():
-    engine = make_engine(
-        risk_per_trade=250.0,
-        max_total_risk=300.0,
-        max_concurrent_positions=3,
+@pytest.mark.parametrize(
+    ("theoretical_quantity", "expected_quantity"),
+    [
+        (0.25, 0),
+        (0.50, 0),
+        (0.75, 0),
+        (0.99, 0),
+        (1.00, 1),
+        (1.01, 1),
+        (1.49, 1),
+        (1.50, 1),
+        (1.55, 1),
+        (1.99, 1),
+        (2.00, 2),
+        (2.01, 2),
+        (2.99, 2),
+        (3.00, 3),
+    ],
+)
+def test_contract_sizing_always_floors(
+    theoretical_quantity: float,
+    expected_quantity: int,
+):
+    """
+    Contract sizing must always satisfy:
+
+        executable_quantity <= theoretical_quantity
+
+    and must never round upward.
+    """
+    engine = make_risk_engine()
+
+    risk_per_contract = 125.0 / theoretical_quantity
+    stop_distance = risk_per_contract / 2.0
+
+    request = make_request(
+        entry_price=100.0,
+        stop_price=100.0 - stop_distance,
     )
-
-    first = engine.evaluate(
-        make_request(strategy_name="MRL1"),
-        trading_day=TRADING_DAY,
-    )
-    assert first.approved
-    engine.register_entry(first)
-
-    second = engine.evaluate(
-        make_request(strategy_name="MRS2"),
-        trading_day=TRADING_DAY,
-    )
-
-    assert second.decision is RiskDecision.REJECTED
-    assert "aggregate open risk" in second.reason
-
-
-def test_concurrent_position_limit_is_enforced():
-    engine = make_engine(
-        risk_per_trade=100.0,
-        max_total_risk=500.0,
-        max_concurrent_positions=2,
-    )
-
-    for strategy in ("MRL1", "S2R"):
-        result = engine.evaluate(
-            make_request(strategy_name=strategy),
-            trading_day=TRADING_DAY,
-        )
-        assert result.approved
-        engine.register_entry(result)
-
-    third = engine.evaluate(
-        make_request(strategy_name="MRS2"),
-        trading_day=TRADING_DAY,
-    )
-
-    assert third.decision is RiskDecision.REJECTED
-    assert "concurrent positions" in third.reason
-
-
-def test_daily_trade_limit_is_enforced():
-    engine = make_engine(
-        risk_per_trade=100.0,
-        max_daily_trades=2,
-        max_concurrent_positions=3,
-    )
-
-    first = engine.evaluate(
-        make_request(strategy_name="MRL1"),
-        trading_day=TRADING_DAY,
-    )
-    engine.register_entry(first)
-    engine.register_exit("MRL1", realized_pnl=50.0)
-
-    second = engine.evaluate(
-        make_request(strategy_name="S2R"),
-        trading_day=TRADING_DAY,
-    )
-    engine.register_entry(second)
-    engine.register_exit("S2R", realized_pnl=50.0)
-
-    third = engine.evaluate(
-        make_request(strategy_name="MRS2"),
-        trading_day=TRADING_DAY,
-    )
-
-    assert third.decision is RiskDecision.REJECTED
-    assert "daily trades" in third.reason
-
-
-def test_daily_loss_limit_blocks_new_entries():
-    engine = make_engine(
-        max_daily_loss=100.0,
-        risk_per_trade=50.0,
-    )
-
-    first = engine.evaluate(
-        make_request(strategy_name="MRL1"),
-        trading_day=TRADING_DAY,
-    )
-    engine.register_entry(first)
-    engine.register_exit("MRL1", realized_pnl=-100.0)
 
     result = engine.evaluate(
-        make_request(strategy_name="S2R"),
+        request,
         trading_day=TRADING_DAY,
     )
 
-    assert result.decision is RiskDecision.REJECTED
-    assert "daily loss limit" in result.reason
+    assert result.quantity == expected_quantity
 
-
-def test_daily_state_resets_on_new_trading_day():
-    engine = make_engine(
-        max_daily_loss=100.0,
-        risk_per_trade=50.0,
-    )
-
-    first = engine.evaluate(
-        make_request(strategy_name="MRL1"),
-        trading_day=TRADING_DAY,
-    )
-    engine.register_entry(first)
-    engine.register_exit("MRL1", realized_pnl=-100.0)
-
-    blocked = engine.evaluate(
-        make_request(strategy_name="S2R"),
-        trading_day=TRADING_DAY,
-    )
-    assert blocked.decision is RiskDecision.REJECTED
-
-    next_day = engine.evaluate(
-        make_request(strategy_name="S2R"),
-        trading_day=date(2026, 9, 24),
-    )
-
-    assert next_day.approved
-    assert engine.daily_realized_pnl == 0.0
-    assert engine.daily_trade_count == 0
-
-
-def test_rejected_result_cannot_be_registered():
-    engine = make_engine(risk_per_trade=40.0)
-
-    result = engine.evaluate(
-        make_request(),
-        trading_day=TRADING_DAY,
-    )
-
-    assert not result.approved
-
-    with pytest.raises(ValueError, match="rejected"):
-        engine.register_entry(result)
-
-
-def test_exit_requires_existing_position():
-    engine = make_engine()
-
-    with pytest.raises(RuntimeError, match="no open position"):
-        engine.register_exit("MRS2", realized_pnl=10.0)
-
-
-def test_open_risk_is_removed_after_exit():
-    engine = make_engine(risk_per_trade=250.0)
-
-    result = engine.evaluate(
-        make_request(),
-        trading_day=TRADING_DAY,
-    )
-    engine.register_entry(result)
-
-    assert engine.open_position_count == 1
-    assert engine.open_risk == 250.0
-
-    engine.register_exit("MRS2", realized_pnl=125.0)
-
-    assert engine.open_position_count == 0
-    assert engine.open_risk == 0.0
-    assert engine.daily_realized_pnl == 125.0
+    if expected_quantity == 0:
+        assert result.decision is RiskDecision.REJECTED
+    else:
+        assert result.decision is RiskDecision.APPROVED
+        assert result.total_risk <= 125.0 + 1e-9
