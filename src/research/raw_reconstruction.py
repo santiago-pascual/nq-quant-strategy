@@ -49,7 +49,13 @@ class HMMParityReport:
 
     @property
     def passed(self) -> bool:
-        return self.mismatches == 0 and self.reconstructed_rows == self.oracle_rows
+        return (
+            self.reconstructed_rows == self.oracle_rows
+            and self.common_timestamps == self.oracle_rows
+            and self.missing_canonical_timestamps == 0
+            and self.missing_reconstructed_timestamps == 0
+            and self.mismatches == 0
+        )
 
 
 def load_canonical_market() -> pd.DataFrame:
@@ -100,12 +106,22 @@ def reconstruct_mr_hmm_window(window: int) -> pd.DataFrame:
     )
     model.fit(train)
     states = model.predict_states(oos)
-    return pd.DataFrame(
+    predicted = pd.DataFrame(
         {
             "timestamp": oos.loc[states.index, "canonical_timestamp"].to_numpy(),
             "window": window,
             "hmm_state": states.to_numpy(dtype=np.int8),
         }
+    )
+    predicted["timestamp"] = pd.to_datetime(predicted["timestamp"], utc=True)
+
+    event_map = selected[["timestamp", "window"]].copy()
+    event_map["timestamp"] = pd.to_datetime(event_map["timestamp"], utc=True)
+    return event_map.merge(
+        predicted,
+        on=["window", "timestamp"],
+        how="left",
+        validate="one_to_one",
     )
 
 
@@ -144,9 +160,13 @@ def compare_hmm_window(
         oracle_rows=len(oracle),
         common_timestamps=len(merged),
         missing_canonical_timestamps=len(oracle_timestamps - reconstructed_timestamps),
-        missing_reconstructed_timestamps=len(reconstructed_timestamps - oracle_timestamps),
+        missing_reconstructed_timestamps=len(
+            reconstructed_timestamps - oracle_timestamps
+        ),
         mismatches=len(mismatched),
-        mismatch_percentage=(100.0 * len(mismatched) / len(merged)) if len(merged) else 0.0,
+        mismatch_percentage=(100.0 * len(mismatched) / len(merged))
+        if len(merged)
+        else 0.0,
         first_mismatch=timestamps.min() if not timestamps.empty else None,
         last_mismatch=timestamps.max() if not timestamps.empty else None,
         elapsed_seconds=perf_counter() - started,
