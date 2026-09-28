@@ -175,6 +175,12 @@ class CausalMarketContext:
         return self._bars_seen
 
     @property
+    def last_timestamp(self) -> pd.Timestamp | None:
+        if not self._bars:
+            return None
+        return pd.Timestamp(self._bars[-1]["timestamp"])
+
+    @property
     def hmm_fitted(self) -> bool:
         return (
             self._hmm is not None
@@ -191,6 +197,10 @@ class CausalMarketContext:
     @property
     def research_models(self) -> dict[int, VolatilityRegimeModel]:
         return dict(self._research_models)
+
+    @property
+    def s2_models(self) -> dict[int, Any]:
+        return dict(self._s2_models)
 
     @property
     def windowed_hmm(self) -> WindowedLiveHMM | None:
@@ -954,6 +964,59 @@ class CausalMarketContext:
         return value
 
 
+def build_causal_context_features(raw: pd.DataFrame) -> pd.DataFrame:
+    """Build the causal context feature history used by indexed replay and warmup."""
+    from src.research.direction.direction_features import (
+        add_directional_pressure_features,
+        add_normalized_momentum_features,
+        add_range_location_features,
+    )
+
+    required = {"open", "high", "low", "close", "volume"}
+    missing = required - set(raw.columns)
+    timestamp_column = (
+        "timestamp ET"
+        if "timestamp ET" in raw.columns
+        else "timestamp"
+        if "timestamp" in raw.columns
+        else None
+    )
+    if missing or timestamp_column is None:
+        if timestamp_column is None:
+            missing.add("timestamp or timestamp ET")
+        raise ValueError(f"Raw market data missing columns: {sorted(missing)}")
+
+    selected_columns = [
+        timestamp_column,
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+    ]
+    if "market_period" in raw.columns:
+        selected_columns.append("market_period")
+    features = raw[selected_columns].copy()
+    source_timestamps = pd.to_datetime(features[timestamp_column], errors="raise")
+    if source_timestamps.dt.tz is None:
+        source_timestamps = source_timestamps.dt.tz_localize("UTC")
+    features["timestamp"] = source_timestamps.dt.tz_convert("UTC")
+    features["timestamp ET"] = source_timestamps.dt.tz_convert(
+        "America/New_York"
+    )
+    features = features.sort_values("timestamp").reset_index(drop=True)
+    features = add_return_features(features)
+    features = add_volatility_features(features)
+    features = add_directional_pressure_features(features)
+    features = add_range_location_features(features)
+    features = add_normalized_momentum_features(features)
+    close = pd.to_numeric(features["close"], errors="coerce")
+    features["zscore_30"] = (
+        (close - close.rolling(30).mean()) / close.rolling(30).std()
+    )
+    return features
+
+
 class PaperMarketContextEngine:
     """Indexed replay facade over the incremental causal market context."""
 
@@ -963,54 +1026,7 @@ class PaperMarketContextEngine:
         *,
         min_train_valid: int = 500,
     ) -> None:
-        from src.research.direction.direction_features import (
-            add_directional_pressure_features,
-            add_normalized_momentum_features,
-            add_range_location_features,
-        )
-
-        required = {"open", "high", "low", "close", "volume"}
-        missing = required - set(raw.columns)
-        timestamp_column = (
-            "timestamp ET"
-            if "timestamp ET" in raw.columns
-            else "timestamp"
-            if "timestamp" in raw.columns
-            else None
-        )
-        if missing or timestamp_column is None:
-            if timestamp_column is None:
-                missing.add("timestamp or timestamp ET")
-            raise ValueError(f"Raw market data missing columns: {sorted(missing)}")
-
-        selected_columns = [
-            timestamp_column,
-            "open",
-            "high",
-            "low",
-            "close",
-            "volume",
-        ]
-        if "market_period" in raw.columns:
-            selected_columns.append("market_period")
-        features = raw[selected_columns].copy()
-        source_timestamps = pd.to_datetime(features[timestamp_column], errors="raise")
-        if source_timestamps.dt.tz is None:
-            source_timestamps = source_timestamps.dt.tz_localize("UTC")
-        features["timestamp"] = source_timestamps.dt.tz_convert("UTC")
-        features["timestamp ET"] = source_timestamps.dt.tz_convert(
-            "America/New_York"
-        )
-        features = features.sort_values("timestamp").reset_index(drop=True)
-        features = add_return_features(features)
-        features = add_volatility_features(features)
-        features = add_directional_pressure_features(features)
-        features = add_range_location_features(features)
-        features = add_normalized_momentum_features(features)
-        close = pd.to_numeric(features["close"], errors="coerce")
-        features["zscore_30"] = (
-            (close - close.rolling(30).mean()) / close.rolling(30).std()
-        )
+        features = build_causal_context_features(raw)
         self.features = features
 
         local = features["timestamp"].dt.tz_convert("America/New_York")

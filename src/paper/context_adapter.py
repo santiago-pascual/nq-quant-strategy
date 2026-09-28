@@ -50,19 +50,14 @@ class PaperMarketContextAdapter:
 
         timestamp = pd.Timestamp(market_data["timestamp"])
 
-        row = pd.DataFrame(
-            [
-                {
-                    "timestamp": timestamp,
-                    "open": float(market_data["open"]),
-                    "high": float(market_data["high"]),
-                    "low": float(market_data["low"]),
-                    "close": float(market_data["close"]),
-                    "volume": float(market_data["volume"]),
-                }
-            ]
-        )
-
+        row = {
+            "timestamp": timestamp,
+            "open": float(market_data["open"]),
+            "high": float(market_data["high"]),
+            "low": float(market_data["low"]),
+            "close": float(market_data["close"]),
+            "volume": float(market_data["volume"]),
+        }
         enriched = self.context.update(row)
 
         result = dict(market_data)

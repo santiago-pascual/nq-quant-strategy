@@ -14,10 +14,8 @@ class FakeContext:
     def __init__(self) -> None:
         self.calls = []
 
-    def update(self, frame: pd.DataFrame):
-        self.calls.append(frame.copy())
-
-        row = frame.iloc[-1]
+    def update(self, market_data):
+        self.calls.append(dict(market_data))
 
         return pd.Series(
             {
@@ -29,7 +27,7 @@ class FakeContext:
                 "realized_vol_30": 0.03,
                 "realized_vol_60": 0.04,
             },
-            name=row["timestamp"],
+            name=market_data["timestamp"],
         )
 
 
@@ -67,7 +65,7 @@ def test_adapter_preserves_raw_market_data_and_adds_context():
 
     # Context received exactly one bar.
     assert len(context.calls) == 1
-    assert len(context.calls[0]) == 1
+    assert context.calls[0]["timestamp"] == bar["timestamp"]
 
 
 def test_adapter_is_stateful():
@@ -80,11 +78,11 @@ def test_adapter_is_stateful():
 
     assert len(context.calls) == 3
 
-    assert context.calls[0]["timestamp"].iloc[0] == pd.Timestamp("2026-01-05 14:30:00")
+    assert context.calls[0]["timestamp"] == pd.Timestamp("2026-01-05 14:30:00")
 
-    assert context.calls[1]["timestamp"].iloc[0] == pd.Timestamp("2026-01-05 14:31:00")
+    assert context.calls[1]["timestamp"] == pd.Timestamp("2026-01-05 14:31:00")
 
-    assert context.calls[2]["timestamp"].iloc[0] == pd.Timestamp("2026-01-05 14:32:00")
+    assert context.calls[2]["timestamp"] == pd.Timestamp("2026-01-05 14:32:00")
 
 
 def test_adapter_rejects_missing_columns():

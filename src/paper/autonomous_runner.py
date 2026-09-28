@@ -292,6 +292,7 @@ class AutonomousPaperRunner:
         self.config = config or AutonomousRunConfig()
 
         self.stats = AutonomousRunStats()
+        self.daily_equity: list[dict[str, Any]] = []
 
     def run(
         self,
@@ -344,6 +345,13 @@ class AutonomousPaperRunner:
         if df.empty:
             raise ValueError("No MNQ bars remain after applying the requested date range.")
 
+        selected_start = df["timestamp"].iloc[0]
+        primed_through = context.last_timestamp if context.bars_seen else None
+        if primed_through is not None and primed_through >= selected_start:
+            raise ValueError(
+                "Primed market context must end strictly before replay starts."
+            )
+
         self.stats = AutonomousRunStats(
             total_bars=len(df),
             first_timestamp=df["timestamp"].iloc[0],
@@ -351,8 +359,8 @@ class AutonomousPaperRunner:
         )
 
         started = time.perf_counter()
+        self.daily_equity = []
 
-        selected_start = df["timestamp"].iloc[0]
         for index, row in full_df.iterrows():
             if end is not None and row["timestamp"] > end:
                 break
@@ -362,6 +370,8 @@ class AutonomousPaperRunner:
             )
 
             if row["timestamp"] < selected_start:
+                if primed_through is not None and row["timestamp"] <= primed_through:
+                    continue
                 self.context_adapter.update(market_data)
                 continue
 
@@ -378,10 +388,29 @@ class AutonomousPaperRunner:
             #   execution
             #   fills
             #
-            self.paper_engine.process_bar(
+            result = self.paper_engine.process_bar(
                 market_data,
                 context_index=index,
             )
+            local_day = row["timestamp"].tz_convert("America/New_York").date()
+            if (
+                not self.daily_equity
+                or self.daily_equity[-1]["date"] != local_day.isoformat()
+            ):
+                self.daily_equity.append(
+                    {
+                        "date": local_day.isoformat(),
+                        "equity": result.account_equity,
+                        "realized_pnl": result.realized_pnl,
+                        "commissions": result.commissions,
+                    }
+                )
+            else:
+                self.daily_equity[-1].update(
+                    equity=result.account_equity,
+                    realized_pnl=result.realized_pnl,
+                    commissions=result.commissions,
+                )
             enriched_market_data = getattr(
                 self.paper_engine,
                 "last_market_data",
@@ -397,6 +426,19 @@ class AutonomousPaperRunner:
                 and self.stats.processed_bars % self.config.progress_every_bars == 0
             ):
                 self._print_progress()
+
+        peak_equity = (
+            float(getattr(self.paper_engine, "config").initial_equity)
+            if hasattr(self.paper_engine, "config")
+            else 0.0
+        )
+        for daily in self.daily_equity:
+            peak_equity = max(peak_equity, float(daily["equity"]))
+            daily["peak_equity"] = peak_equity
+            daily["drawdown"] = float(daily["equity"]) - peak_equity
+            daily["drawdown_pct"] = (
+                100.0 * daily["drawdown"] / peak_equity if peak_equity else 0.0
+            )
 
         self.stats.elapsed_seconds = time.perf_counter() - started
 
@@ -490,7 +532,7 @@ def build_runner(
 
 def load_canonical_raw_mnq() -> pd.DataFrame:
     """
-    Load ONLY the canonical raw Databento MNQ dataset.
+    Load raw Databento MNQ bars with a validated UTC ``timestamp`` column.
     """
 
     print("=" * 80)
@@ -498,6 +540,7 @@ def load_canonical_raw_mnq() -> pd.DataFrame:
     print("=" * 80)
 
     dataframe = load_databento_mnq()
+    dataframe = _canonicalize_raw_mnq(dataframe)
 
     print(f"Raw bars loaded: {len(dataframe):,}")
 
@@ -508,6 +551,60 @@ def load_canonical_raw_mnq() -> pd.DataFrame:
     print()
 
     return dataframe
+
+
+def _canonicalize_raw_mnq(dataframe: pd.DataFrame) -> pd.DataFrame:
+    """Normalize the Databento loader's ET timestamp into a UTC column."""
+    if not isinstance(dataframe, pd.DataFrame):
+        raise TypeError("Databento MNQ loader must return a pandas DataFrame.")
+    if dataframe.empty:
+        raise ValueError("Databento MNQ loader returned no bars.")
+
+    frame = dataframe.copy()
+    timestamp_source = next(
+        (name for name in ("timestamp", "timestamp ET") if name in frame.columns),
+        None,
+    )
+    if timestamp_source is None:
+        if isinstance(frame.index, pd.DatetimeIndex):
+            source_timestamps = pd.Series(frame.index, index=frame.index)
+        elif frame.index.name in {"timestamp", "timestamp ET", "ts_event"}:
+            source_timestamps = pd.Series(frame.index, index=frame.index)
+        else:
+            raise ValueError(
+                "Databento MNQ data requires a timestamp/timestamp ET column "
+                "or a datetime timestamp index."
+            )
+    else:
+        source_timestamps = frame[timestamp_source].reset_index(drop=True)
+        frame = frame.reset_index(drop=True)
+
+    frame["timestamp"] = pd.to_datetime(
+        source_timestamps.to_numpy(),
+        utc=True,
+        errors="raise",
+    )
+    if timestamp_source == "timestamp ET":
+        frame = frame.drop(columns=["timestamp ET"])
+    if timestamp_source is None:
+        frame = frame.reset_index(drop=True)
+
+    required = {"timestamp", "open", "high", "low", "close", "volume"}
+    missing = required - set(frame.columns)
+    if missing:
+        raise ValueError(
+            f"Databento MNQ data is missing required columns: {sorted(missing)}"
+        )
+    if not frame["timestamp"].is_monotonic_increasing:
+        frame = frame.sort_values("timestamp", kind="mergesort").reset_index(drop=True)
+    if frame["timestamp"].duplicated().any():
+        duplicates = int(frame["timestamp"].duplicated().sum())
+        raise ValueError(
+            f"Databento MNQ data contains {duplicates} duplicate timestamps."
+        )
+    if len(frame) != len(dataframe):
+        raise RuntimeError("Canonicalizing Databento timestamps changed row count.")
+    return frame
 
 
 def run_autonomous_paper(

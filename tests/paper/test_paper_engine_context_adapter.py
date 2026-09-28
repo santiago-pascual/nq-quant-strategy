@@ -10,11 +10,11 @@ class FakeContext:
     def __init__(self):
         self.calls = []
 
-    def update(self, frame):
-        self.calls.append(frame.copy())
+    def update(self, market_data):
+        self.calls.append(dict(market_data))
 
         return {
-            "timestamp": frame["timestamp"].iloc[-1],
+            "timestamp": market_data["timestamp"],
             "hmm_state": 2,
             "vol_percentile": 0.85,
             "zscore": 2.25,
@@ -62,7 +62,7 @@ def test_context_adapter_is_used_without_context_index(monkeypatch):
     assert enriched["zscore"] == 2.25
 
     assert len(adapter_context.calls) == 1
-    assert len(adapter_context.calls[0]) == 1
+    assert adapter_context.calls[0]["timestamp"] == bar["timestamp"]
 
 
 def test_context_adapter_rejects_simultaneous_legacy_context():
