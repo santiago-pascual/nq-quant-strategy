@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 from hmmlearn.hmm import GaussianHMM
+from scipy.special import logsumexp
 from sklearn.preprocessing import StandardScaler
 
 HMM_FEATURES = [
@@ -126,6 +127,45 @@ class VolatilityRegimeModel:
             index=data.index,
             name="hmm_state",
         )
+
+    def predict_causal_state(
+        self,
+        df: pd.DataFrame,
+        *,
+        previous_probabilities: np.ndarray | None = None,
+    ) -> tuple[int, np.ndarray]:
+        """Filter one current observation without decoding future observations."""
+        if not self._is_fitted:
+            raise RuntimeError("Model must be fitted before predicting states.")
+
+        data = self.prepare_data(df)
+        if len(data) != 1:
+            raise ValueError("Causal state filtering requires exactly one valid row.")
+
+        standardized = self.standardize(data, fit=False).to_numpy()
+        log_emission = self.model._compute_log_likelihood(standardized)[0]
+
+        if previous_probabilities is None:
+            log_prior = np.log(np.clip(self.model.startprob_, 1e-300, None))
+        else:
+            probabilities = np.asarray(previous_probabilities, dtype=float)
+            if probabilities.shape != (self.n_states,):
+                raise ValueError("previous_probabilities has the wrong shape.")
+            if not np.isfinite(probabilities).all() or (probabilities < 0).any():
+                raise ValueError("previous_probabilities must be finite and non-negative.")
+            total = probabilities.sum()
+            if total <= 0:
+                raise ValueError("previous_probabilities must have positive mass.")
+            log_prior = logsumexp(
+                np.log(np.clip(probabilities / total, 1e-300, None))[:, None]
+                + np.log(np.clip(self.model.transmat_, 1e-300, None)),
+                axis=0,
+            )
+
+        log_posterior = log_prior + log_emission
+        log_posterior -= logsumexp(log_posterior)
+        posterior = np.exp(log_posterior)
+        return int(np.argmax(posterior)), posterior
 
     def predict_probabilities(
         self,

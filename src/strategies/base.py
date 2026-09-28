@@ -97,6 +97,32 @@ class BaseStrategy(ABC):
 
         return None
 
+    def get_entry_fill_price(
+        self,
+        *,
+        signal: StrategySignal,
+        market_data: Mapping[str, Any],
+    ) -> float | None:
+        """Return an explicit strategy-specific same-bar entry execution price."""
+        return None
+
+    def get_entry_reference_price(
+        self,
+        *,
+        signal: StrategySignal,
+        market_data: Mapping[str, Any],
+    ) -> float:
+        """Return the signal-time reference used for pre-trade risk checks."""
+        return float(market_data["close"])
+
+    def get_exit_fill_price(
+        self,
+        *,
+        market_data: Mapping[str, Any],
+    ) -> float | None:
+        """Return an explicit strategy-specific same-bar exit execution price."""
+        return None
+
     def on_fill(
         self,
         *,

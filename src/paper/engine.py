@@ -3,10 +3,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from typing import Any, Iterable
 
-from src.broker import BrokerAdapter, BrokerFill
+import numpy as np
+
+from src.broker import (
+    BrokerAdapter,
+    BrokerFill,
+    BrokerOrderStatus,
+    InMemoryBrokerAdapter,
+)
 
 from src.execution import ExecutionEngine
 
@@ -28,6 +36,7 @@ from src.strategies.base import (
     StrategyDecision,
     StrategySignal,
 )
+from src.strategies.s2r.strategy import S2RStrategy
 
 
 # ============================================================================
@@ -50,6 +59,17 @@ class PaperEngineConfig:
     """
 
     point_value: float = 2.0
+    initial_equity: float = 50_000.0
+    tick_size: float = 0.25
+    price_offset: float = 0.0
+    commission_per_contract: float = 0.0
+    automatic_simulated_fills: bool = False
+
+    def __post_init__(self) -> None:
+        if self.point_value <= 0 or self.initial_equity <= 0 or self.tick_size <= 0:
+            raise ValueError("point_value, initial_equity, and tick_size must be positive.")
+        if self.price_offset < 0 or self.commission_per_contract < 0:
+            raise ValueError("price_offset and commission must be non-negative.")
 
 
 # ============================================================================
@@ -74,8 +94,10 @@ class PaperStepResult:
     submitted_orders: tuple[Any, ...]
 
     fills: tuple[Any, ...]
-
     open_positions: tuple[Any, ...]
+    account_equity: float = 0.0
+    realized_pnl: float = 0.0
+    commissions: float = 0.0
 
 
 # ============================================================================
@@ -274,6 +296,22 @@ class PaperTradingEngine:
         # is completely filled.
 
         self._pending_entry_requests: dict[str, EntryRequest] = {}
+        self._automatic_simulated_fills = self.config.automatic_simulated_fills
+        if self._automatic_simulated_fills and not isinstance(
+            self.broker, InMemoryBrokerAdapter
+        ):
+            raise TypeError(
+                "Automatic simulated fills require InMemoryBrokerAdapter."
+            )
+        self._simulated_orders: dict[
+            str, tuple[str, datetime, float | None]
+        ] = {}
+        self._pending_strategy_orders: dict[str, set[str]] = {}
+        self._newly_filled_strategies: set[str] = set()
+        self._realized_pnl = 0.0
+        self._commissions = 0.0
+        self._account_equity = self.config.initial_equity
+        self._position_commissions: dict[str, float] = {}
 
     # ========================================================================
 
@@ -337,6 +375,29 @@ class PaperTradingEngine:
     def last_decisions(self) -> dict[str, StrategyDecision]:
 
         return dict(self._last_decisions)
+
+    @property
+    def last_market_data(self) -> dict[str, Any] | None:
+        return dict(self._last_market_data) if self._last_market_data is not None else None
+
+    @property
+    def account_equity(self) -> float:
+        return self._account_equity
+
+    @property
+    def realized_pnl(self) -> float:
+        return self._realized_pnl
+
+    @property
+    def commissions(self) -> float:
+        return self._commissions
+
+    def enable_simulated_fills(self) -> None:
+        if not isinstance(self.broker, InMemoryBrokerAdapter):
+            raise TypeError(
+                "Automatic simulated fills require InMemoryBrokerAdapter."
+            )
+        self._automatic_simulated_fills = True
 
     def position(self, strategy_name: str):
 
@@ -409,6 +470,19 @@ class PaperTradingEngine:
 
         return self.context_adapter.update(market_data)
 
+    def _configure_window_models(self, market_data: dict[str, Any]) -> None:
+        window = market_data.get("hmm_window")
+        if market_data.get("hmm_state") is None or window is None:
+            return
+        if self.context_adapter is None:
+            return
+        for strategy in self.strategies:
+            if isinstance(strategy, S2RStrategy) and strategy.model_window != int(window):
+                strategy.set_fitted_model(
+                    self.context_adapter.context.s2_model_for_window(int(window)),
+                    window=int(window),
+                )
+
     # MARKET DATA SERIALIZATION
 
     # ========================================================================
@@ -466,6 +540,39 @@ class PaperTradingEngine:
         decisions: dict[str, StrategyDecision] = {}
 
         for strategy in self.strategies:
+            if self._pending_strategy_orders.get(strategy.name):
+                decision = StrategyDecision(
+                    signal=StrategySignal.FLAT,
+                    action=StrategyAction.HOLD,
+                    reason="broker order pending",
+                )
+                decisions[strategy.name] = decision
+                self.logger.log_strategy_decision(
+                    strategy_name=strategy.name,
+                    action=decision.action.value,
+                    signal=decision.signal.value,
+                    timestamp=timestamp,
+                    reason=decision.reason,
+                )
+                continue
+            if (
+                strategy.name in self._newly_filled_strategies
+                and self.lifecycle.has_position(strategy.name)
+            ):
+                decision = StrategyDecision(
+                    signal=StrategySignal.FLAT,
+                    action=StrategyAction.HOLD,
+                    reason="entry bar is not managed",
+                )
+                decisions[strategy.name] = decision
+                self.logger.log_strategy_decision(
+                    strategy_name=strategy.name,
+                    action=decision.action.value,
+                    signal=decision.signal.value,
+                    timestamp=timestamp,
+                    reason=decision.reason,
+                )
+                continue
             lifecycle_result = self.lifecycle.evaluate(
                 strategy_name=strategy.name,
                 market_data=market_data,
@@ -536,7 +643,12 @@ class PaperTradingEngine:
                 f"Strategy {strategy.name} produced ENTER with FLAT signal"
             )
 
-        entry_price = float(market_data["close"])
+        entry_price = float(
+            strategy.get_entry_reference_price(
+                signal=decision.signal,
+                market_data=market_data,
+            )
+        )
 
         # The strategy owns its risk geometry. The paper engine remains
 
@@ -547,6 +659,9 @@ class PaperTradingEngine:
             signal=decision.signal,
             market_data=market_data,
         )
+
+        if stop_price is None:
+            stop_price = market_data.get("risk_stop_price")
 
         if stop_price is None:
             raise ValueError(
@@ -583,7 +698,9 @@ class PaperTradingEngine:
 
         risk_result = self.risk.evaluate(
             risk_request,
-            trading_day=timestamp.date(),
+            trading_day=timestamp.astimezone(
+                ZoneInfo("America/New_York")
+            ).date(),
         )
 
         self.logger.log_risk_decision(
@@ -667,6 +784,15 @@ class PaperTradingEngine:
         self._pending_risk_results[broker_order.broker_order_id] = risk_result
 
         self._pending_entry_requests[broker_order.broker_order_id] = entry_request
+        self._register_pending_order(
+            broker_order.broker_order_id,
+            strategy.name,
+            timestamp,
+            strategy.get_entry_fill_price(
+                signal=decision.signal,
+                market_data=market_data,
+            ),
+        )
 
         self.logger.log_order_created(
             {
@@ -704,6 +830,7 @@ class PaperTradingEngine:
         strategy: BaseStrategy,
         decision: StrategyDecision,
         timestamp: datetime,
+        market_data: dict[str, Any] | None = None,
     ):
         """
 
@@ -740,6 +867,12 @@ class PaperTradingEngine:
         broker_order = self.broker_execution.submit_exit(
             intent,
         )
+        self._register_pending_order(
+            broker_order.broker_order_id,
+            strategy.name,
+            timestamp,
+            strategy.get_exit_fill_price(market_data=market_data or {}),
+        )
 
         self.logger.log_order_created(
             {
@@ -766,6 +899,96 @@ class PaperTradingEngine:
 
         return broker_order
 
+    def _register_pending_order(
+        self,
+        broker_order_id: str,
+        strategy_name: str,
+        timestamp: datetime,
+        fill_price_override: float | None,
+    ) -> None:
+        self._pending_strategy_orders.setdefault(strategy_name, set()).add(
+            broker_order_id
+        )
+        if self._automatic_simulated_fills:
+            self._simulated_orders[broker_order_id] = (
+                strategy_name,
+                timestamp,
+                fill_price_override,
+            )
+
+    def _advance_simulated_fills(
+        self,
+        market_data: dict[str, Any],
+        timestamp: datetime,
+        *,
+        immediate_only: bool,
+    ) -> list[BrokerFill]:
+        if not self._automatic_simulated_fills:
+            return []
+        if not isinstance(self.broker, InMemoryBrokerAdapter):
+            raise RuntimeError("Simulated fills are configured for a non-simulated broker.")
+
+        results: list[BrokerFill] = []
+        for broker_order_id, (
+            strategy_name,
+            submitted_at,
+            override_price,
+        ) in list(self._simulated_orders.items()):
+            immediate = override_price is not None and submitted_at == timestamp
+            due = immediate if immediate_only else (
+                override_price is None and submitted_at < timestamp
+            )
+            if not due:
+                continue
+            order = self.broker.get_order(broker_order_id)
+            if order is None or order.status not in {
+                BrokerOrderStatus.SUBMITTED,
+                BrokerOrderStatus.PARTIALLY_FILLED,
+            }:
+                self._simulated_orders.pop(broker_order_id, None)
+                self._discard_pending_order(strategy_name, broker_order_id)
+                continue
+            if override_price is None:
+                base_price = float(market_data["open"])
+            else:
+                base_price = float(override_price)
+            offset = (
+                np.ceil(self.config.price_offset / self.config.tick_size)
+                * self.config.tick_size
+            )
+            direction = 1.0 if order.request.signal is StrategySignal.LONG else -1.0
+            fill_price = base_price + direction * offset
+            fill = self.broker.process_fill(
+                broker_order_id,
+                quantity=order.request.quantity,
+                price=fill_price,
+            )
+            self.process_broker_fill(fill, timestamp=timestamp)
+            results.append(fill)
+        return results
+
+    def _discard_pending_order(self, strategy_name: str, broker_order_id: str) -> None:
+        pending = self._pending_strategy_orders.get(strategy_name)
+        if pending is None:
+            return
+        pending.discard(broker_order_id)
+        if not pending:
+            self._pending_strategy_orders.pop(strategy_name, None)
+
+    def _refresh_pending_orders(self) -> None:
+        for strategy_name, order_ids in list(self._pending_strategy_orders.items()):
+            for broker_order_id in tuple(order_ids):
+                broker_order = self.broker.get_order(broker_order_id)
+                if broker_order is None or broker_order.status not in {
+                    BrokerOrderStatus.CANCELLED,
+                    BrokerOrderStatus.REJECTED,
+                }:
+                    continue
+                self._simulated_orders.pop(broker_order_id, None)
+                self._pending_risk_results.pop(broker_order_id, None)
+                self._pending_entry_requests.pop(broker_order_id, None)
+                self._discard_pending_order(strategy_name, broker_order_id)
+
     # ========================================================================
 
     # MARKET BAR
@@ -776,7 +999,7 @@ class PaperTradingEngine:
         self,
         market_data: dict[str, Any],
         *,
-        account_equity: float,
+        account_equity: float | None = None,
         context_index: int | None = None,
     ) -> PaperStepResult:
         """
@@ -812,6 +1035,7 @@ class PaperTradingEngine:
             market_data,
             context_index=context_index,
         )
+        self._configure_window_models(market_data)
 
         # The context engine is authoritative for the enriched timestamp.
 
@@ -819,6 +1043,11 @@ class PaperTradingEngine:
 
         if not isinstance(timestamp, datetime):
             raise TypeError("enriched market_data timestamp must be datetime")
+        if account_equity is not None:
+            if account_equity <= 0:
+                raise ValueError("account_equity must be positive.")
+            if self._last_timestamp is None:
+                self._account_equity = float(account_equity)
 
         # ------------------------------------------------------------------
 
@@ -837,13 +1066,24 @@ class PaperTradingEngine:
 
         # ------------------------------------------------------------------
 
+        trading_day = timestamp.astimezone(ZoneInfo("America/New_York")).date()
         if (
             self._last_timestamp is None
-            or timestamp.date() != self._last_timestamp.date()
+            or trading_day
+            != self._last_timestamp.astimezone(ZoneInfo("America/New_York")).date()
         ):
             self.risk.reset_day(
-                timestamp.date(),
+                trading_day,
             )
+
+        self._last_market_data = dict(market_data)
+        self._newly_filled_strategies.clear()
+        fills = self._advance_simulated_fills(
+            market_data,
+            timestamp,
+            immediate_only=False,
+        )
+        self._refresh_pending_orders()
 
         # ------------------------------------------------------------------
 
@@ -875,6 +1115,7 @@ class PaperTradingEngine:
                         strategy,
                         decision,
                         timestamp,
+                        market_data,
                     )
 
                     if broker_order is not None:
@@ -890,13 +1131,21 @@ class PaperTradingEngine:
                     decision,
                     market_data,
                     timestamp,
-                    account_equity,
+                    self._account_equity,
                 )
 
                 if broker_order is not None:
                     submitted_orders.append(
                         broker_order,
                     )
+
+        fills.extend(
+            self._advance_simulated_fills(
+                market_data,
+                timestamp,
+                immediate_only=True,
+            )
+        )
 
         # ------------------------------------------------------------------
 
@@ -906,9 +1155,8 @@ class PaperTradingEngine:
 
         self._last_timestamp = timestamp
 
-        self._last_market_data = dict(market_data)
-
         self._last_decisions = dict(decisions)
+        self._newly_filled_strategies.clear()
 
         positions = tuple(self.execution.get_positions())
 
@@ -916,8 +1164,11 @@ class PaperTradingEngine:
             timestamp=timestamp,
             decisions=decisions,
             submitted_orders=tuple(submitted_orders),
-            fills=(),
+            fills=tuple(fills),
             open_positions=positions,
+            account_equity=self._account_equity,
+            realized_pnl=self._realized_pnl,
+            commissions=self._commissions,
         )
 
     # ========================================================================
@@ -993,6 +1244,19 @@ class PaperTradingEngine:
             broker_fill,
             timestamp=timestamp,
         )
+        commission = (
+            broker_fill.quantity * self.config.commission_per_contract
+        )
+        self._commissions += commission
+        self._account_equity -= commission
+        self._position_commissions[strategy_name] = (
+            self._position_commissions.get(strategy_name, 0.0) + commission
+        )
+
+        broker_order = self.broker.get_order(broker_fill.broker_order_id)
+        if broker_order is not None and self._is_filled_status(broker_order.status):
+            self._simulated_orders.pop(broker_fill.broker_order_id, None)
+            self._discard_pending_order(strategy_name, broker_fill.broker_order_id)
 
         position_after = self.lifecycle.position(
             strategy_name,
@@ -1025,6 +1289,7 @@ class PaperTradingEngine:
         if execution_action is StrategyAction.ENTER:
             if position_after is None:
                 raise RuntimeError("Entry fill did not create an execution position")
+            self._newly_filled_strategies.add(strategy_name)
 
             # First fill.
 
@@ -1100,9 +1365,7 @@ class PaperTradingEngine:
 
             # authorization state is needed anymore.
 
-            broker_order = self.broker.get_order(
-                broker_fill.broker_order_id,
-            )
+            broker_order = self.broker.get_order(broker_fill.broker_order_id)
 
             if broker_order is None:
                 raise RuntimeError("Broker order disappeared after fill")
@@ -1174,14 +1437,19 @@ class PaperTradingEngine:
             realized_pnl = (
                 price_difference * position_before.quantity * self.config.point_value
             )
+            self._realized_pnl += realized_pnl
+            self._account_equity += realized_pnl
 
             # Risk release follows the actual quantity that was exited.
 
             self.risk.register_exit_fill(
                 strategy_name,
                 fill_quantity=position_before.quantity,
-                realized_pnl=realized_pnl,
+                realized_pnl=(
+                    realized_pnl - self._position_commissions[strategy_name]
+                ),
             )
+            self._position_commissions.pop(strategy_name, None)
 
             # The execution position is now flat, so the portfolio slot
 
@@ -1200,3 +1468,11 @@ class PaperTradingEngine:
             return execution_fill
 
         raise RuntimeError("Unsupported execution action for broker fill")
+
+    @staticmethod
+    def _is_filled_status(status: Any) -> bool:
+        return (
+            status is BrokerOrderStatus.FILLED
+            or getattr(status, "value", None) == BrokerOrderStatus.FILLED.value
+            or getattr(status, "name", None) == BrokerOrderStatus.FILLED.name
+        )

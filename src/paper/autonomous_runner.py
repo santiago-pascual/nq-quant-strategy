@@ -48,11 +48,20 @@ import time
 import pandas as pd
 
 from src.databento_loader import load_databento_mnq
+from src.models.windowed_regime import (
+    ResearchHMMWindow,
+    load_frozen_research_hmm_windows,
+)
 from src.paper.context_adapter import PaperMarketContextAdapter
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 RESULTS_DIR = PROJECT_ROOT / "results" / "paper" / "autonomous"
+FROZEN_HMM_SCHEDULE = (
+    Path(__file__).resolve().parent
+    / "config"
+    / "research_07_hmm_window_schedule.csv"
+)
 
 
 @dataclass(frozen=True)
@@ -119,6 +128,8 @@ def _normalise_timestamp(value: Any) -> pd.Timestamp:
 def _prepare_market_data(
     dataframe: pd.DataFrame,
     config: AutonomousRunConfig,
+    *,
+    apply_range: bool = True,
 ) -> pd.DataFrame:
     """
     Validate and normalize the canonical Databento dataframe.
@@ -127,8 +138,14 @@ def _prepare_market_data(
     No historical result is loaded here.
     """
 
+    timestamp_column = (
+        "timestamp"
+        if "timestamp" in dataframe.columns
+        else "timestamp ET"
+        if "timestamp ET" in dataframe.columns
+        else None
+    )
     required = {
-        "timestamp",
         "open",
         "high",
         "low",
@@ -138,12 +155,17 @@ def _prepare_market_data(
 
     missing = required.difference(dataframe.columns)
 
-    if missing:
+    if missing or timestamp_column is None:
+        if timestamp_column is None:
+            missing.add("timestamp or timestamp ET")
         raise ValueError(
             f"Canonical MNQ dataset is missing required columns: {sorted(missing)}"
         )
 
-    df = dataframe[["timestamp", "open", "high", "low", "close", "volume"]].copy()
+    df = dataframe[
+        [timestamp_column, "open", "high", "low", "close", "volume"]
+    ].copy()
+    df = df.rename(columns={timestamp_column: "timestamp"})
 
     df["timestamp"] = pd.to_datetime(
         df["timestamp"],
@@ -177,17 +199,17 @@ def _prepare_market_data(
                 f"Canonical MNQ data contains {duplicates} duplicate timestamps."
             )
 
-    if config.start_timestamp is not None:
+    if apply_range and config.start_timestamp is not None:
         start = _normalise_timestamp(config.start_timestamp)
         df = df.loc[df["timestamp"] >= start]
 
-    if config.end_timestamp is not None:
+    if apply_range and config.end_timestamp is not None:
         end = _normalise_timestamp(config.end_timestamp)
         df = df.loc[df["timestamp"] <= end]
 
     df = df.reset_index(drop=True)
 
-    if df.empty:
+    if df.empty and apply_range:
         raise ValueError("No MNQ bars remain after applying the requested date range.")
 
     return df
@@ -207,6 +229,31 @@ def _row_to_market_data(row: pd.Series) -> dict[str, Any]:
         "close": float(row["close"]),
         "volume": float(row["volume"]),
     }
+
+
+def identify_final_rth_bars(
+    dataframe: pd.DataFrame,
+    *,
+    timestamp_column: str = "timestamp",
+    rth_start_minute: int = 9 * 60 + 30,
+    rth_end_minute: int = 16 * 60,
+) -> frozenset[pd.Timestamp]:
+    """Return the last available RTH bar timestamp for each New York session."""
+    if timestamp_column not in dataframe:
+        raise KeyError(f"Missing session timestamp column: {timestamp_column}")
+    timestamps = pd.to_datetime(
+        dataframe[timestamp_column],
+        utc=True,
+        errors="raise",
+    )
+    local = timestamps.dt.tz_convert("America/New_York")
+    minute_of_day = local.dt.hour * 60 + local.dt.minute
+    rth = (minute_of_day >= rth_start_minute) & (minute_of_day < rth_end_minute)
+    if not bool(rth.any()):
+        return frozenset()
+    session_dates = local.dt.date
+    final_by_session = timestamps[rth].groupby(session_dates[rth]).max()
+    return frozenset(pd.Timestamp(value) for value in final_by_session.tolist())
 
 
 class AutonomousPaperRunner:
@@ -231,7 +278,17 @@ class AutonomousPaperRunner:
         config: AutonomousRunConfig | None = None,
     ) -> None:
         self.paper_engine = paper_engine
-        self.context_adapter = context_adapter
+        engine_context = getattr(paper_engine, "context_adapter", None)
+        if engine_context is None:
+            paper_engine.context_adapter = context_adapter
+            engine_context = context_adapter
+        if engine_context is not context_adapter:
+            raise ValueError(
+                "Autonomous runner and paper engine must share one context adapter."
+            )
+        if hasattr(paper_engine, "enable_simulated_fills"):
+            paper_engine.enable_simulated_fills()
+        self.context_adapter = engine_context
         self.config = config or AutonomousRunConfig()
 
         self.stats = AutonomousRunStats()
@@ -244,10 +301,48 @@ class AutonomousPaperRunner:
         Replay the supplied canonical market dataframe chronologically.
         """
 
-        df = _prepare_market_data(
+        full_df = _prepare_market_data(
             dataframe,
             self.config,
+            apply_range=False,
         )
+        if full_df.empty:
+            raise ValueError("Canonical MNQ dataset is empty.")
+
+        final_rth_bars = identify_final_rth_bars(full_df)
+        if not final_rth_bars:
+            raise ValueError("Canonical MNQ dataset contains no regular-hours bars.")
+        windows = load_frozen_research_hmm_windows(FROZEN_HMM_SCHEDULE)
+        context = self.context_adapter.context
+        if not context.bars_seen:
+            self.context_adapter.configure_research_windows(windows)
+        elif context.windowed_hmm is None:
+            raise RuntimeError(
+                "Cannot attach research windows after context replay has started."
+            )
+        elif context.windowed_hmm.windows != windows:
+            raise RuntimeError(
+                "Active HMM windows differ from the frozen Research 07 schedule."
+            )
+
+        start = (
+            _normalise_timestamp(self.config.start_timestamp)
+            if self.config.start_timestamp is not None
+            else None
+        )
+        end = (
+            _normalise_timestamp(self.config.end_timestamp)
+            if self.config.end_timestamp is not None
+            else None
+        )
+        range_mask = pd.Series(True, index=full_df.index)
+        if start is not None:
+            range_mask &= full_df["timestamp"] >= start
+        if end is not None:
+            range_mask &= full_df["timestamp"] <= end
+        df = full_df.loc[range_mask].reset_index(drop=True)
+        if df.empty:
+            raise ValueError("No MNQ bars remain after applying the requested date range.")
 
         self.stats = AutonomousRunStats(
             total_bars=len(df),
@@ -257,20 +352,18 @@ class AutonomousPaperRunner:
 
         started = time.perf_counter()
 
-        for index, row in df.iterrows():
+        selected_start = df["timestamp"].iloc[0]
+        for index, row in full_df.iterrows():
+            if end is not None and row["timestamp"] > end:
+                break
             market_data = _row_to_market_data(row)
+            market_data["is_final_rth_bar"] = (
+                pd.Timestamp(row["timestamp"]) in final_rth_bars
+            )
 
-            # ---------------------------------------------------------
-            # CAUSAL CONTEXT
-            # ---------------------------------------------------------
-            #
-            # The adapter sees only the information available up to
-            # this bar. No future rows are passed into it.
-            #
-            enriched_market_data = self.context_adapter.update(market_data)
-
-            if self._context_is_ready(enriched_market_data):
-                self.stats.context_ready_bars += 1
+            if row["timestamp"] < selected_start:
+                self.context_adapter.update(market_data)
+                continue
 
             # ---------------------------------------------------------
             # PAPER ENGINE
@@ -286,9 +379,16 @@ class AutonomousPaperRunner:
             #   fills
             #
             self.paper_engine.process_bar(
-                enriched_market_data,
+                market_data,
                 context_index=index,
             )
+            enriched_market_data = getattr(
+                self.paper_engine,
+                "last_market_data",
+                None,
+            ) or market_data
+            if self._context_is_ready(enriched_market_data):
+                self.stats.context_ready_bars += 1
 
             self.stats.processed_bars += 1
 
@@ -369,7 +469,10 @@ def build_runner(
 
     This is important:
 
-        context_adapter = PaperMarketContextAdapter()
+        context_adapter = (
+            getattr(paper_engine, "context_adapter", None)
+            or PaperMarketContextAdapter()
+        )
 
     creates new HMM/context state for this run.
 

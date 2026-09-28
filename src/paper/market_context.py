@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
+import random
 from typing import Any, Mapping, Sequence
 
 import numpy as np
@@ -13,6 +15,11 @@ from src.feature_engine import (
 from src.models.regime import (
     HMM_FEATURES,
     VolatilityRegimeModel,
+)
+from src.models.windowed_regime import (
+    ResearchHMMWindow,
+    WindowedLiveHMM,
+    build_research_hmm_windows,
 )
 
 
@@ -28,9 +35,83 @@ class MarketContextConfig:
     hmm_min_train_valid: int = 500
 
     volatility_percentile_window: int = 500
+    # Retained for configuration compatibility; Research 08AA uses an
+    # expanding percentile against strictly prior observations.
     zscore_window: int = 30
 
     price_column: str = "close"
+
+
+class _RankNode:
+    __slots__ = ("key", "priority", "count", "size", "left", "right")
+
+    def __init__(self, key: float, priority: float) -> None:
+        self.key = key
+        self.priority = priority
+        self.count = 1
+        self.size = 1
+        self.left: _RankNode | None = None
+        self.right: _RankNode | None = None
+
+
+class _OrderStatisticTreap:
+    def __init__(self) -> None:
+        self._root: _RankNode | None = None
+        self._priorities = random.Random(0)
+
+    @staticmethod
+    def _size(node: _RankNode | None) -> int:
+        return node.size if node is not None else 0
+
+    def insert(self, key: float) -> None:
+        self._root = self._insert(self._root, key)
+
+    def _insert(self, node: _RankNode | None, key: float) -> _RankNode:
+        if node is None:
+            return _RankNode(key, self._priorities.random())
+        if key == node.key:
+            node.count += 1
+        elif key < node.key:
+            node.left = self._insert(node.left, key)
+            if node.left.priority < node.priority:
+                node = self._rotate_right(node)
+        else:
+            node.right = self._insert(node.right, key)
+            if node.right.priority < node.priority:
+                node = self._rotate_left(node)
+        node.size = node.count + self._size(node.left) + self._size(node.right)
+        return node
+
+    def rank_less_equal(self, key: float) -> int:
+        node = self._root
+        rank = 0
+        while node is not None:
+            if key < node.key:
+                node = node.left
+            else:
+                rank += self._size(node.left) + node.count
+                node = node.right
+        return rank
+
+    @classmethod
+    def _rotate_right(cls, node: _RankNode) -> _RankNode:
+        root = node.left
+        assert root is not None
+        node.left = root.right
+        root.right = node
+        node.size = node.count + cls._size(node.left) + cls._size(node.right)
+        root.size = root.count + cls._size(root.left) + cls._size(root.right)
+        return root
+
+    @classmethod
+    def _rotate_left(cls, node: _RankNode) -> _RankNode:
+        root = node.right
+        assert root is not None
+        node.right = root.left
+        root.left = node
+        node.size = node.count + cls._size(node.left) + cls._size(node.right)
+        root.size = root.count + cls._size(root.left) + cls._size(root.right)
+        return root
 
 
 class CausalMarketContext:
@@ -51,14 +132,17 @@ class CausalMarketContext:
 
     HMM handling has two modes:
 
-    1. ONLINE
-       A frozen fitted model is used for current-bar inference.
+    1. WINDOWED LIVE
+       The current chronological research-window model is frozen at its
+       pre-window training boundary and forward-filtered one bar at a time.
 
     2. RESEARCH WINDOW
-       A fresh HMM is fitted for every explicit OOS window, using
-       only observations strictly before the OOS start.
+       A fresh HMM is fitted for every explicit OOS window, using only
+       observations strictly before the OOS start, then the complete OOS
+       sequence is Viterbi-decoded for historical reproduction.
 
-    The second mode exists specifically to reproduce Research 08b.
+    Whole-OOS research Viterbi decoding and causal live filtering are
+    intentionally different procedures.
     """
 
     def __init__(
@@ -67,12 +151,20 @@ class CausalMarketContext:
     ) -> None:
         self.config = config or MarketContextConfig()
 
-        self._bars: list[dict[str, Any]] = []
+        self._bars: deque[dict[str, Any]] = deque(maxlen=62)
+        self._bars_seen = 0
+        self._feature_rows: deque[dict[str, Any]] = deque(maxlen=500)
+        self._hmm_feature_history: list[dict[str, Any]] = []
+        self._volatility_rank_tree = _OrderStatisticTreap()
+        self._volatility_observations = 0
 
         self._hmm: VolatilityRegimeModel | None = None
         self._hmm_fitted_through: pd.Timestamp | None = None
+        self._research_window_definitions: tuple[ResearchHMMWindow, ...] | None = None
+        self._windowed_hmm: WindowedLiveHMM | None = None
 
         self._research_models: dict[int, VolatilityRegimeModel] = {}
+        self._s2_models: dict[int, Any] = {}
 
     # ------------------------------------------------------------------
     # Properties
@@ -80,11 +172,17 @@ class CausalMarketContext:
 
     @property
     def bars_seen(self) -> int:
-        return len(self._bars)
+        return self._bars_seen
 
     @property
     def hmm_fitted(self) -> bool:
-        return self._hmm is not None
+        return (
+            self._hmm is not None
+            or (
+                self._windowed_hmm is not None
+                and bool(self._windowed_hmm.fitted_windows)
+            )
+        )
 
     @property
     def hmm_fitted_through(self) -> pd.Timestamp | None:
@@ -94,17 +192,114 @@ class CausalMarketContext:
     def research_models(self) -> dict[int, VolatilityRegimeModel]:
         return dict(self._research_models)
 
+    @property
+    def windowed_hmm(self) -> WindowedLiveHMM | None:
+        return self._windowed_hmm
+
+    def configure_research_windows(
+        self,
+        windows: Sequence[ResearchHMMWindow],
+    ) -> None:
+        if self._bars_seen:
+            raise RuntimeError("Research windows must be configured before replay.")
+        self._windowed_hmm = WindowedLiveHMM(
+            windows,
+            min_train_valid=self.config.hmm_min_train_valid,
+            model_factory=self._new_hmm,
+        )
+        self._research_window_definitions = tuple(windows)
+
+    def prime_history(self, features: pd.DataFrame) -> None:
+        """Seed bounded context and HMM training history before a replay slice."""
+        if self._bars_seen:
+            raise RuntimeError("Market context has already consumed bars.")
+        if self._windowed_hmm is None:
+            raise RuntimeError("Research windows must be configured before priming.")
+        required = {
+            "timestamp",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "realized_vol_30",
+            *HMM_FEATURES,
+        }
+        missing = required - set(features.columns)
+        if missing:
+            raise KeyError(f"Context warmup missing columns: {sorted(missing)}")
+        history = features.copy()
+        history["timestamp"] = pd.to_datetime(
+            history["timestamp"], utc=True, errors="raise"
+        )
+        if not history["timestamp"].is_monotonic_increasing:
+            raise ValueError("Context warmup timestamps must be chronological.")
+        self._windowed_hmm.prime_history(history)
+        self._bars.extend(
+            self._normalize_bar(row)
+            for row in history.tail(62).to_dict(orient="records")
+        )
+        self._feature_rows.extend(history.tail(500).to_dict(orient="records"))
+        self._hmm_feature_history = [
+            {
+                "timestamp": row["timestamp"],
+                **{name: row[name] for name in HMM_FEATURES},
+            }
+            for row in history.to_dict(orient="records")
+        ]
+        volatility = pd.to_numeric(
+            history["realized_vol_30"], errors="coerce"
+        ).to_numpy(dtype=float)
+        for value in volatility:
+            if np.isfinite(value):
+                self._volatility_rank_tree.insert(float(value))
+                self._volatility_observations += 1
+        self._bars_seen = len(history)
+
+    def _causal_volatility_percentile(self, value: Any) -> float | None:
+        try:
+            current = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not np.isfinite(current):
+            return None
+        percentile = (
+            100.0
+            * self._volatility_rank_tree.rank_less_equal(current)
+            / self._volatility_observations
+            if self._volatility_observations
+            else None
+        )
+        self._volatility_rank_tree.insert(current)
+        self._volatility_observations += 1
+        return percentile
+
     # ------------------------------------------------------------------
     # Reset
     # ------------------------------------------------------------------
 
     def reset(self) -> None:
         self._bars.clear()
+        self._bars_seen = 0
+        self._feature_rows.clear()
+        self._hmm_feature_history.clear()
+        self._volatility_rank_tree = _OrderStatisticTreap()
+        self._volatility_observations = 0
 
         self._hmm = None
         self._hmm_fitted_through = None
+        self._windowed_hmm = (
+            WindowedLiveHMM(
+                self._research_window_definitions,
+                min_train_valid=self.config.hmm_min_train_valid,
+                model_factory=self._new_hmm,
+            )
+            if self._research_window_definitions is not None
+            else None
+        )
 
         self._research_models.clear()
+        self._s2_models.clear()
 
     # ------------------------------------------------------------------
     # Normal live/online update
@@ -123,12 +318,27 @@ class CausalMarketContext:
         bar = self._normalize_bar(market_data)
 
         self._bars.append(bar)
+        self._bars_seen += 1
 
         frame = self._build_features(pd.DataFrame(self._bars))
+        current_feature_row = frame.iloc[-1].to_dict()
+        self._feature_rows.append(current_feature_row)
+        self._hmm_feature_history.append(
+            {
+                "timestamp": current_feature_row["timestamp"],
+                **{name: current_feature_row.get(name) for name in HMM_FEATURES},
+            }
+        )
+        volatility_percentile = self._causal_volatility_percentile(
+            current_feature_row.get("realized_vol_30")
+        )
+        context_frame = pd.DataFrame(self._feature_rows)
 
         context = self._build_context_from_frame(
-            frame,
+            context_frame,
             bar,
+            current_feature_row=current_feature_row,
+            volatility_percentile=volatility_percentile,
         )
 
         return context
@@ -333,10 +543,14 @@ class CausalMarketContext:
         self,
         frame: pd.DataFrame,
         raw_bar: Mapping[str, Any],
+        *,
+        current_feature_row: Mapping[str, Any] | None = None,
+        volatility_percentile: float | None = None,
     ) -> dict[str, Any]:
         current = frame.iloc[-1]
 
         context = dict(raw_bar)
+        feature_values = current_feature_row or current.to_dict()
 
         feature_columns = (
             "log_return",
@@ -363,14 +577,46 @@ class CausalMarketContext:
         )
 
         for column in feature_columns:
-            if column in frame.columns:
-                context[column] = self._safe_float(current[column])
+            if column in feature_values:
+                context[column] = self._safe_float(feature_values[column])
 
+        context.update(self._calculate_directional_features(frame))
         context["zscore"] = self._calculate_zscore(frame)
 
-        context["vol_percentile"] = self._calculate_volatility_percentile(frame)
+        context["vol_percentile"] = volatility_percentile
 
-        context["hmm_state"] = self._calculate_online_hmm_state(frame)
+        if self._windowed_hmm is not None:
+            live_features = {
+                **feature_values,
+                **{
+                    name: context.get(name)
+                    for name in (
+                        "directional_pressure_30",
+                        "close_location_30",
+                        "normalized_momentum_30",
+                    )
+                },
+            }
+            context["hmm_state"] = self._windowed_hmm.update(
+                {
+                    "timestamp": live_features["timestamp"],
+                    **{
+                        name: live_features.get(name)
+                        for name in (
+                            *HMM_FEATURES,
+                            "past_return_30",
+                            "directional_pressure_30",
+                            "close_location_30",
+                            "normalized_momentum_30",
+                        )
+                    },
+                }
+            )
+            context["hmm_window"] = self._active_window_number(
+                pd.Timestamp(feature_values["timestamp"])
+            )
+        else:
+            context["hmm_state"] = self._calculate_online_hmm_state(frame)
 
         context["market_context_ready"] = (
             context["hmm_state"] is not None
@@ -379,6 +625,46 @@ class CausalMarketContext:
         )
 
         return context
+
+    @staticmethod
+    def _calculate_directional_features(frame: pd.DataFrame) -> dict[str, float | None]:
+        if len(frame) < 30 or "log_return" not in frame:
+            return {
+                "directional_pressure_30": None,
+                "close_location_30": None,
+                "normalized_momentum_30": None,
+            }
+        returns = pd.to_numeric(frame["log_return"].tail(30), errors="coerce")
+        if returns.isna().any():
+            return {
+                "directional_pressure_30": None,
+                "close_location_30": None,
+                "normalized_momentum_30": None,
+            }
+        upside = float(returns.clip(lower=0).sum())
+        downside = float((-returns).clip(lower=0).sum())
+        total = upside + downside
+        closes = pd.to_numeric(frame["close"].tail(30), errors="coerce")
+        width = float(closes.max() - closes.min())
+        momentum = CausalMarketContext._safe_float(frame["past_return_30"].iloc[-1])
+        volatility = CausalMarketContext._safe_float(
+            frame["realized_vol_30"].iloc[-1]
+        )
+        return {
+            "directional_pressure_30": (
+                (upside - downside) / total if total > 0 else None
+            ),
+            "close_location_30": (
+                (float(closes.iloc[-1]) - float(closes.min())) / width
+                if width > 0
+                else None
+            ),
+            "normalized_momentum_30": (
+                momentum / volatility
+                if momentum is not None and volatility is not None and volatility > 0
+                else None
+            ),
+        }
 
     # ------------------------------------------------------------------
     # Online HMM
@@ -398,13 +684,14 @@ class CausalMarketContext:
         which exists to reproduce Research 08b exactly.
         """
 
-        if len(frame) < 2:
+        if len(self._hmm_feature_history) < 2:
             return None
 
-        current_timestamp = pd.Timestamp(frame["timestamp"].iloc[-1])
+        history = pd.DataFrame(self._hmm_feature_history)
+        current_timestamp = pd.Timestamp(history["timestamp"].iloc[-1])
 
         if self._hmm is None:
-            train = frame.iloc[:-1].copy()
+            train = history.iloc[:-1].copy()
 
             valid_train = self._valid_hmm_rows(train)
 
@@ -419,7 +706,7 @@ class CausalMarketContext:
 
             self._hmm_fitted_through = current_timestamp
 
-        current = frame.iloc[[-1]].copy()
+        current = history.iloc[[-1]].copy()
 
         valid_current = self._valid_hmm_rows(current)
 
@@ -432,6 +719,54 @@ class CausalMarketContext:
             return None
 
         return int(states.iloc[-1])
+
+    def _active_window_number(self, timestamp: pd.Timestamp) -> int | None:
+        if self._windowed_hmm is None:
+            return None
+        for window in self._windowed_hmm.windows:
+            if window.oos_start <= timestamp <= window.oos_end:
+                return window.window
+        return None
+
+    def s2_model_for_window(self, window: int):
+        if self._windowed_hmm is None:
+            raise RuntimeError("Windowed HMM is not configured.")
+        cached = self._s2_models.get(window)
+        if cached is not None:
+            return cached
+        model = self._windowed_hmm.models.get(window)
+        if model is None:
+            raise RuntimeError(f"HMM window {window} has not been fitted.")
+        training = self._windowed_hmm.training_frame(window)
+        required = {
+            "past_return_30",
+            "directional_pressure_30",
+            "close_location_30",
+            "normalized_momentum_30",
+            "realized_vol_30",
+        }
+        missing = required - set(training.columns)
+        if missing:
+            raise KeyError(
+                "S2R training history missing fields: " + ", ".join(sorted(missing))
+            )
+        states = model.predict_states(training)
+        training["hmm_state"] = states
+        from src.strategies.s2r.fitting import fit_s2_model
+
+        rows = training[
+            [
+                "hmm_state",
+                "past_return_30",
+                "directional_pressure_30",
+                "close_location_30",
+                "normalized_momentum_30",
+                "realized_vol_30",
+            ]
+        ].to_dict("records")
+        fitted = fit_s2_model(rows)
+        self._s2_models[window] = fitted
+        return fitted
 
     # ------------------------------------------------------------------
     # Z-score
@@ -459,7 +794,7 @@ class CausalMarketContext:
         rolling_std = close.rolling(
             window=window,
             min_periods=window,
-        ).std(ddof=0)
+        ).std(ddof=1)
 
         close_value = close.iloc[-1]
         mean_value = rolling_mean.iloc[-1]
@@ -479,55 +814,6 @@ class CausalMarketContext:
             return None
 
         return float((close_value - mean_value) / std_value)
-
-    # ------------------------------------------------------------------
-    # Volatility percentile
-    # ------------------------------------------------------------------
-
-    def _calculate_volatility_percentile(
-        self,
-        frame: pd.DataFrame,
-    ) -> float | None:
-        if "realized_vol_30" not in frame.columns:
-            return None
-
-        series = (
-            pd.to_numeric(
-                frame["realized_vol_30"],
-                errors="coerce",
-            )
-            .replace(
-                [np.inf, -np.inf],
-                np.nan,
-            )
-            .dropna()
-        )
-
-        if series.empty:
-            return None
-
-        window = self.config.volatility_percentile_window
-
-        if len(series) > window:
-            series = series.iloc[-window:]
-
-        current = float(series.iloc[-1])
-
-        if not np.isfinite(current):
-            return None
-
-        values = np.sort(series.to_numpy(dtype=float))
-
-        if len(values) == 1:
-            return 0.0
-
-        rank = np.searchsorted(
-            values,
-            current,
-            side="right",
-        )
-
-        return float(rank / len(values) * 100.0)
 
     # ------------------------------------------------------------------
     # HMM helpers
@@ -666,3 +952,137 @@ class CausalMarketContext:
             return None
 
         return value
+
+
+class PaperMarketContextEngine:
+    """Indexed replay facade over the incremental causal market context."""
+
+    def __init__(
+        self,
+        raw: pd.DataFrame,
+        *,
+        min_train_valid: int = 500,
+    ) -> None:
+        from src.research.direction.direction_features import (
+            add_directional_pressure_features,
+            add_normalized_momentum_features,
+            add_range_location_features,
+        )
+
+        required = {"open", "high", "low", "close", "volume"}
+        missing = required - set(raw.columns)
+        timestamp_column = (
+            "timestamp ET"
+            if "timestamp ET" in raw.columns
+            else "timestamp"
+            if "timestamp" in raw.columns
+            else None
+        )
+        if missing or timestamp_column is None:
+            if timestamp_column is None:
+                missing.add("timestamp or timestamp ET")
+            raise ValueError(f"Raw market data missing columns: {sorted(missing)}")
+
+        selected_columns = [
+            timestamp_column,
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+        ]
+        if "market_period" in raw.columns:
+            selected_columns.append("market_period")
+        features = raw[selected_columns].copy()
+        source_timestamps = pd.to_datetime(features[timestamp_column], errors="raise")
+        if source_timestamps.dt.tz is None:
+            source_timestamps = source_timestamps.dt.tz_localize("UTC")
+        features["timestamp"] = source_timestamps.dt.tz_convert("UTC")
+        features["timestamp ET"] = source_timestamps.dt.tz_convert(
+            "America/New_York"
+        )
+        features = features.sort_values("timestamp").reset_index(drop=True)
+        features = add_return_features(features)
+        features = add_volatility_features(features)
+        features = add_directional_pressure_features(features)
+        features = add_range_location_features(features)
+        features = add_normalized_momentum_features(features)
+        close = pd.to_numeric(features["close"], errors="coerce")
+        features["zscore_30"] = (
+            (close - close.rolling(30).mean()) / close.rolling(30).std()
+        )
+        self.features = features
+
+        local = features["timestamp"].dt.tz_convert("America/New_York")
+        minutes = local.dt.hour * 60 + local.dt.minute
+        if "market_period" in features.columns:
+            rth_mask = features["market_period"].eq("RTH")
+        else:
+            rth_mask = (minutes >= 9 * 60 + 30) & (minutes < 16 * 60)
+        windows = build_research_hmm_windows(
+            features.loc[rth_mask],
+            n_windows=22,
+            timestamp_column="timestamp",
+            event_column="zscore_30",
+        )
+        self._context = CausalMarketContext(
+            MarketContextConfig(hmm_min_train_valid=min_train_valid)
+        )
+        self._context.configure_research_windows(windows)
+        self._next_index = 0
+
+    def find_first_hmm_ready_index(self) -> int | None:
+        valid = (
+            self.features[HMM_FEATURES]
+            .replace([np.inf, -np.inf], np.nan)
+            .notna()
+            .all(axis=1)
+        )
+        timestamps = self.features["timestamp"]
+        for window in self._context.windowed_hmm.windows:
+            training_valid = valid & (timestamps < window.oos_start)
+            if int(training_valid.sum()) < self._context.config.hmm_min_train_valid:
+                continue
+            in_window = (
+                valid
+                & (timestamps >= window.oos_start)
+                & (timestamps <= window.oos_end)
+            )
+            matches = np.flatnonzero(in_window.to_numpy())
+            if len(matches):
+                return int(matches[0])
+        return None
+
+    def process_bar(self, index: int) -> dict[str, Any]:
+        if index < self._next_index or index >= len(self.features):
+            raise ValueError("process_bar index must advance within the feature data.")
+        if self._next_index == 0 and index > 0:
+            self._context.prime_history(self.features.iloc[:index])
+            self._next_index = index
+        context: dict[str, Any] | None = None
+        while self._next_index <= index:
+            row = self.features.iloc[self._next_index]
+            context = self._context.update(
+                {
+                    "timestamp": row["timestamp"],
+                    "timestamp ET": row["timestamp ET"],
+                    **{
+                        name: row[name]
+                        for name in ("open", "high", "low", "close", "volume")
+                    },
+                }
+            )
+            for name in (
+                "timestamp ET",
+                "zscore_30",
+                "past_return_30",
+                "directional_pressure_30",
+                "close_location_30",
+                "normalized_momentum_30",
+            ):
+                context[name] = row[name]
+            context["zscore"] = row["zscore_30"]
+            self._next_index += 1
+        if context is None:
+            raise RuntimeError("No context was generated.")
+        return context

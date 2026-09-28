@@ -38,11 +38,12 @@ class S2RStrategy(BaseStrategy):
 
     def __init__(
         self,
-        fitted_model: S2FittedModel,
+        fitted_model: S2FittedModel | None = None,
         config: S2RConfig | None = None,
     ) -> None:
         self.config = config or S2RConfig()
         self.fitted_model = fitted_model
+        self.model_window: int | None = None
 
         self._entry_rule = S2SignalRule(
             target_state=self.config.target_state,
@@ -62,6 +63,8 @@ class S2RStrategy(BaseStrategy):
         self._in_trade = False
         self._entry_price: float | None = None
         self._entry_bar: int | None = None
+        self._last_bar_index = 0
+        self._pending_exit_price: float | None = None
 
     @property
     def name(self) -> str:
@@ -91,6 +94,8 @@ class S2RStrategy(BaseStrategy):
 
         if self._in_trade:
             return StrategySignal.FLAT
+        if self.fitted_model is None:
+            return StrategySignal.FLAT
 
         hmm_state = market_data.get("hmm_state")
 
@@ -107,11 +112,8 @@ class S2RStrategy(BaseStrategy):
 
         quality = self.fitted_model.signal_model.calculate_quality(features)
 
-        volatility_percentile = market_data.get("vol_percentile")
-
-        if volatility_percentile is None:
-            realized_vol = market_data.get("realized_vol_30")
-            volatility_percentile = self.fitted_model.transform_volatility(realized_vol)
+        realized_vol = market_data.get("realized_vol_30")
+        volatility_percentile = self.fitted_model.transform_volatility(realized_vol)
 
         if self._entry_rule.qualifies(
             hmm_state=hmm_state,
@@ -245,4 +247,81 @@ class S2RStrategy(BaseStrategy):
         self._in_trade = False
         self._entry_price = None
         self._entry_bar = None
+        self._last_bar_index = 0
         self._recovery.reset()
+
+    def get_risk_stop_price(
+        self,
+        *,
+        entry_price: float,
+        signal: StrategySignal,
+        market_data: Mapping[str, Any] | None = None,
+    ) -> float | None:
+        if signal is not StrategySignal.SHORT:
+            return None
+        return float(entry_price) + float(self.config.stop_points)
+
+    def on_fill(
+        self,
+        *,
+        market_data: Mapping[str, Any],
+        position: Any,
+    ) -> None:
+        if position is None:
+            raise RuntimeError("S2R entry fill did not create a position.")
+        if not self._in_trade:
+            self.start_trade(
+                entry_price=float(position.entry_price),
+                entry_bar=self._last_bar_index,
+            )
+
+    def on_market_data(
+        self,
+        market_data: Mapping[str, Any],
+        position: Any,
+    ) -> StrategyDecision:
+        if position is None or not self._in_trade:
+            raise RuntimeError("S2R lifecycle has no active trade state.")
+        self._last_bar_index += 1
+        result = self.update_trade_from_market(
+            bar_index=self._last_bar_index,
+            high=float(market_data["high"]),
+            close=float(market_data["close"]),
+        )
+        if result.state in (
+            RecoveryState.RECOVERED,
+            RecoveryState.FAILED_TO_RECOVER,
+        ):
+            self._pending_exit_price = float(market_data["close"])
+            return StrategyDecision(
+                signal=StrategySignal.FLAT,
+                action=StrategyAction.EXIT,
+                reason=f"S2R recovery {result.state.value}",
+            )
+        return StrategyDecision(
+            signal=StrategySignal.FLAT,
+            action=StrategyAction.HOLD,
+            reason="S2R recovery is being tracked",
+        )
+
+    def on_exit(self) -> None:
+        self.finish_trade()
+        self._pending_exit_price = None
+
+    def get_exit_fill_price(
+        self,
+        *,
+        market_data: Mapping[str, Any],
+    ) -> float | None:
+        price = self._pending_exit_price
+        self._pending_exit_price = None
+        return price
+
+    def set_fitted_model(
+        self,
+        fitted_model: S2FittedModel,
+        *,
+        window: int,
+    ) -> None:
+        self.fitted_model = fitted_model
+        self.model_window = int(window)

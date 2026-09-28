@@ -5,12 +5,18 @@ from typing import Any
 
 from src.strategies.base import (
     BaseStrategy,
+    StrategyAction,
+    StrategyDecision,
     StrategySignal,
 )
 from src.strategies.mean_reversion.config import (
     FROZEN_CONFIGS,
     MeanReversionCandidate,
     MeanReversionConfig,
+)
+from src.strategies.mean_reversion.lifecycle import (
+    MeanReversionLifecycle,
+    MeanReversionTradeState,
 )
 
 
@@ -30,6 +36,9 @@ class MeanReversionStrategy(BaseStrategy):
         config: MeanReversionConfig,
     ) -> None:
         self.config = config
+        self._lifecycle = MeanReversionLifecycle(config)
+        self._trade_state: MeanReversionTradeState | None = None
+        self._pending_exit_price: float | None = None
 
     @property
     def name(self) -> str:
@@ -144,3 +153,61 @@ class MeanReversionStrategy(BaseStrategy):
             return entry + self.config.stop_points
 
         return None
+
+    def on_fill(
+        self,
+        *,
+        market_data: Mapping[str, Any],
+        position: Any,
+    ) -> None:
+        if position is None:
+            raise RuntimeError("Mean-reversion entry fill did not create a position.")
+        if self._trade_state is None:
+            self._trade_state = MeanReversionTradeState(
+                entry_price=float(position.entry_price),
+                side=position.side.value.upper(),
+            )
+
+    def on_market_data(
+        self,
+        market_data: Mapping[str, Any],
+        position: Any,
+    ) -> StrategyDecision:
+        if position is None or self._trade_state is None:
+            raise RuntimeError("Mean-reversion lifecycle has no active trade state.")
+        result = self._lifecycle.evaluate_bar(
+            self._trade_state,
+            high=float(market_data["high"]),
+            low=float(market_data["low"]),
+            close=float(market_data["close"]),
+        )
+        if result is None:
+            self._trade_state = MeanReversionTradeState(
+                entry_price=self._trade_state.entry_price,
+                side=self._trade_state.side,
+                bars_elapsed=self._trade_state.bars_elapsed + 1,
+            )
+            return StrategyDecision(
+                signal=StrategySignal.FLAT,
+                action=StrategyAction.HOLD,
+                reason="mean-reversion trade remains active",
+            )
+        self._pending_exit_price = float(result.exit_price)
+        return StrategyDecision(
+            signal=StrategySignal.FLAT,
+            action=StrategyAction.EXIT,
+            reason=f"mean-reversion {result.reason.value}",
+        )
+
+    def on_exit(self) -> None:
+        self._trade_state = None
+        self._pending_exit_price = None
+
+    def get_exit_fill_price(
+        self,
+        *,
+        market_data: Mapping[str, Any],
+    ) -> float | None:
+        price = self._pending_exit_price
+        self._pending_exit_price = None
+        return price

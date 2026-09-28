@@ -5,6 +5,7 @@ from typing import Any, Mapping
 import pandas as pd
 
 from src.paper.market_context import CausalMarketContext
+from src.models.windowed_regime import ResearchHMMWindow
 
 
 class PaperMarketContextAdapter:
@@ -82,6 +83,12 @@ class PaperMarketContextAdapter:
         result.update(context_data)
 
         return result
+
+    def configure_research_windows(
+        self,
+        windows: tuple[ResearchHMMWindow, ...],
+    ) -> None:
+        self.context.configure_research_windows(windows)
 
     @classmethod
     def _validate_market_data(
