@@ -207,32 +207,13 @@ class PaperEventLogger:
 
         event_timestamp = event_timestamp.astimezone(timezone.utc)
 
-        event = PaperEvent(
-            event_id=str(uuid4()),
-            sequence=self._next_sequence,
-            event_type=event_type,
-            timestamp=event_timestamp,
-            payload=dict(payload),
-        )
-
-        serialized = json.dumps(
-            event.to_dict(),
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-
         with self._lock:
-            # Re-check sequence in case this logger was re-used after
-            # another process appended to the same file.
-            self._next_sequence = self._discover_next_sequence()
-
             event = PaperEvent(
-                event_id=event.event_id,
+                event_id=str(uuid4()),
                 sequence=self._next_sequence,
-                event_type=event.event_type,
-                timestamp=event.timestamp,
-                payload=event.payload,
+                event_type=event_type,
+                timestamp=event_timestamp,
+                payload=dict(payload),
             )
 
             serialized = json.dumps(

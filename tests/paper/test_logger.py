@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 
 import pytest
@@ -46,7 +47,7 @@ def test_logger_persists_event(tmp_path):
 
     logger = PaperEventLogger(path)
 
-    logger.append(
+    event = logger.append(
         PaperEventType.MARKET_DATA,
         {"close": 20000.0},
         timestamp=ts("2026-09-23T14:30:00+00:00"),
@@ -57,6 +58,39 @@ def test_logger_persists_event(tmp_path):
     lines = path.read_text(encoding="utf-8").splitlines()
 
     assert len(lines) == 1
+    assert json.loads(lines[0]) == event.to_dict()
+
+
+def test_sequence_discovery_runs_once_not_per_append(tmp_path, monkeypatch):
+    path = tmp_path / "paper.jsonl"
+    original_discover = PaperEventLogger._discover_next_sequence
+    discovery_calls = 0
+
+    def count_discovery(logger):
+        nonlocal discovery_calls
+        discovery_calls += 1
+        return original_discover(logger)
+
+    monkeypatch.setattr(
+        PaperEventLogger,
+        "_discover_next_sequence",
+        count_discovery,
+    )
+    logger = PaperEventLogger(path)
+    assert discovery_calls == 1
+
+    events = [
+        logger.append(
+            PaperEventType.MARKET_DATA,
+            {"bar": index},
+            timestamp=ts("2026-09-23T14:30:00+00:00"),
+        )
+        for index in range(250)
+    ]
+
+    assert discovery_calls == 1
+    assert [event.sequence for event in events] == list(range(250))
+    assert [event.sequence for event in logger.read_all()] == list(range(250))
 
 
 # ============================================================================
@@ -321,6 +355,19 @@ def test_corrupted_event_log_is_detected(tmp_path):
     )
 
     with pytest.raises(ValueError, match="Invalid event log"):
+        PaperEventLogger(path)
+
+
+def test_truncated_final_line_is_rejected_without_changing_existing_behavior(tmp_path):
+    path = tmp_path / "paper.jsonl"
+    path.write_text(
+        '{"event_id":"1","sequence":0,"event_type":"market_data",'
+        '"timestamp":"2026-09-23T14:30:00+00:00","payload":{}}\n'
+        '{"event_id":"2","sequence":1',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="Invalid event log at line 2"):
         PaperEventLogger(path)
 
 
