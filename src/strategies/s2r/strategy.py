@@ -298,6 +298,48 @@ class S2RStrategy(BaseStrategy):
                 action=StrategyAction.EXIT,
                 reason=f"S2R recovery {result.state.value}",
             )
+
+        stop_price = self._entry_price + float(self.config.stop_points)
+        target_price = self._entry_price - (
+            float(self.config.stop_points) * float(self.config.rr)
+        )
+        high = float(market_data["high"])
+        low = float(market_data["low"])
+
+        target_hit = low <= target_price
+        stop_hit = high >= stop_price
+        baseline_exit: tuple[float, str] | None = None
+
+        if target_hit and stop_hit:
+            baseline_exit = (
+                stop_price,
+                "S2 baseline both-hit conservative stop "
+                "(NO_RECOVERY_ENRICHMENT / ORIGINAL_S2)",
+            )
+        elif target_hit:
+            baseline_exit = (
+                target_price,
+                "S2 baseline target (NO_RECOVERY_ENRICHMENT / ORIGINAL_S2)",
+            )
+        elif stop_hit:
+            baseline_exit = (
+                stop_price,
+                "S2 baseline stop (NO_RECOVERY_ENRICHMENT / ORIGINAL_S2)",
+            )
+        elif self._last_bar_index >= self.config.horizon_bars:
+            baseline_exit = (
+                float(market_data["close"]),
+                "S2 baseline timeout (NO_RECOVERY_ENRICHMENT / ORIGINAL_S2)",
+            )
+
+        if baseline_exit is not None:
+            self._pending_exit_price, reason = baseline_exit
+            return StrategyDecision(
+                signal=StrategySignal.FLAT,
+                action=StrategyAction.EXIT,
+                reason=reason,
+            )
+
         return StrategyDecision(
             signal=StrategySignal.FLAT,
             action=StrategyAction.HOLD,

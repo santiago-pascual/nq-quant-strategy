@@ -66,14 +66,14 @@ def test_s2r_recovery_lifecycle_exits_at_recovery_deadline():
     strategy.on_fill(market_data={}, position=position)
 
     first = strategy.on_market_data(
-        {"high": 118.0, "close": 100.0},
+        {"high": 118.0, "low": 100.0, "close": 100.0},
         position,
     )
     assert first.action is StrategyAction.HOLD
     last = first
     for _ in range(6):
         last = strategy.on_market_data(
-            {"high": 100.0, "close": 100.0},
+            {"high": 100.0, "low": 100.0, "close": 100.0},
             position,
         )
     assert last.action is StrategyAction.EXIT
