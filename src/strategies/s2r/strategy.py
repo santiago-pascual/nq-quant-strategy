@@ -261,6 +261,16 @@ class S2RStrategy(BaseStrategy):
             return None
         return float(entry_price) + float(self.config.stop_points)
 
+    def get_entry_fill_price(
+        self,
+        *,
+        signal: StrategySignal,
+        market_data: Mapping[str, Any],
+    ) -> float | None:
+        if signal is not StrategySignal.SHORT:
+            return None
+        return float(market_data["close"])
+
     def on_fill(
         self,
         *,
@@ -283,6 +293,7 @@ class S2RStrategy(BaseStrategy):
         if position is None or not self._in_trade:
             raise RuntimeError("S2R lifecycle has no active trade state.")
         self._last_bar_index += 1
+        recovery_was_adverse = self.recovery_state is RecoveryState.ADVERSE
         result = self.update_trade_from_market(
             bar_index=self._last_bar_index,
             high=float(market_data["high"]),
@@ -297,6 +308,13 @@ class S2RStrategy(BaseStrategy):
                 signal=StrategySignal.FLAT,
                 action=StrategyAction.EXIT,
                 reason=f"S2R recovery {result.state.value}",
+            )
+
+        if recovery_was_adverse:
+            return StrategyDecision(
+                signal=StrategySignal.FLAT,
+                action=StrategyAction.HOLD,
+                reason="S2R adverse trade is awaiting its recovery deadline.",
             )
 
         stop_price = self._entry_price + float(self.config.stop_points)

@@ -230,3 +230,40 @@ def test_s2r_recovery_exit_keeps_precedence_over_baseline_exit():
     assert recovered.reason == "S2R recovery recovered"
     assert strategy.get_exit_fill_price(market_data={"close": 94.0}) == 94.0
     assert strategy.recovery_state is RecoveryState.RECOVERED
+
+
+def test_s2r_adverse_trade_waits_through_baseline_stop_until_recovery_deadline():
+    strategy = S2RStrategy(fitted_model=fitted_model())
+    strategy.start_trade(entry_price=100.0, entry_bar=0)
+
+    first = strategy.on_market_data(
+        {"high": 110.0, "low": 99.0, "close": 105.0},
+        position=object(),
+    )
+    adverse = strategy.on_market_data(
+        {"high": 118.0, "low": 99.0, "close": 110.0},
+        position=object(),
+    )
+    assert first.action is StrategyAction.HOLD
+    assert adverse.action is StrategyAction.HOLD
+    assert strategy.recovery_state is RecoveryState.ADVERSE
+
+    for _ in range(4):
+        decision = strategy.on_market_data(
+            {"high": 110.0, "low": 99.0, "close": 110.0},
+            position=object(),
+        )
+        assert decision.action is StrategyAction.HOLD
+
+    baseline_stop_bar = strategy.on_market_data(
+        {"high": 126.0, "low": 99.0, "close": 124.0},
+        position=object(),
+    )
+    assert baseline_stop_bar.action is StrategyAction.HOLD
+
+    deadline_bar = {"high": 127.0, "low": 99.0, "close": 129.0}
+    deadline = strategy.on_market_data(deadline_bar, position=object())
+    assert deadline.action is StrategyAction.EXIT
+    assert deadline.reason == "S2R recovery failed_to_recover"
+    assert strategy.get_exit_fill_price(market_data=deadline_bar) == 129.0
+    assert strategy.recovery_state is RecoveryState.FAILED_TO_RECOVER

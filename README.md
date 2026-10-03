@@ -194,6 +194,12 @@ python .\src\research\portfolio\22_full_system_funded_simulation.py
 
 The scripts perform their own input and count audits and write CSV/PNG reports under `src\research\results\`. The authoritative S2R stream is `src\research\results\s2_extended\s2r_modular_authoritative_reproduction.csv`; the broader `s2r_modular_full_databento_trades.csv` export is not the frozen benchmark.
 
+### Current Paper Engine Research Replay
+
+`python -m src.paper.run_research_replay` runs the current Paper Engine over the inclusive UTC date range **2020-06-23 through 2026-06-19**. It verifies the frozen 08B HMM-state and strategy-trade artifact hashes before use, injects those timestamped Research states without HMM inference, and uses the strategy-specific Research volatility definitions. Mean Reversion and S2R entries fill at the signal bar close; ORB's session-close marker follows the last available ORB-RTH bar for each New York date, including shortened sessions. The existing Paper Engine lifecycle, risk, conflict, execution, and broker paths remain active. A 40-RTH-bar tail manages entries made on the final OOS date; only in-range entry signals are included in the comparison.
+
+Outputs are deterministic files under `results\paper\research_replay\`: `summary.csv`, `trades.csv`, `parity.csv`, and `run_summary.json`. The trade-level parity report identifies missing, extra, and mismatched trades, including the first differing field and strategy attribution. To limit the run to one strategy or change a setting, use `--strategy {MRL1,MRS2,S2R,ORB}`, `--start`, `--end`, `--output-dir`, `--initial-equity`, `--commission-per-contract`, or `--price-offset`. This Research Replay is separate from the causal autonomous runner; it does not run causal HMM inference.
+
 ## Project Structure
 
 ```text

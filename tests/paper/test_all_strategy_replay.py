@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pandas as pd
+import pytest
 
 from src.broker import InMemoryBrokerAdapter
 from src.execution import ExecutionEngine
@@ -159,3 +160,154 @@ def test_one_session_replay_processes_all_four_strategy_lifecycles(tmp_path):
     assert engine.realized_pnl == 113.0
     assert engine.account_equity == 50_105.0
     assert s2r.in_trade is False
+
+
+def test_orb_reenters_once_after_next_session_reset(tmp_path):
+    orb = ORBStrategy()
+    engine = PaperTradingEngine(
+        strategies=[orb],
+        execution=ExecutionEngine(),
+        risk=RiskEngine(
+            RiskLimits(
+                risk_per_trade=500.0,
+                max_total_risk=10_000.0,
+                max_daily_loss=5_000.0,
+                max_concurrent_positions=1,
+                max_daily_trades=10,
+                max_contracts=1,
+            )
+        ),
+        conflict=PortfolioConflictEngine(max_concurrent_positions=1),
+        broker=InMemoryBrokerAdapter(),
+        logger=PaperEventLogger(tmp_path / "orb-session-reset.jsonl"),
+        config=PaperEngineConfig(
+            initial_equity=50_000.0,
+            point_value=2.0,
+            commission_per_contract=0.0,
+            automatic_simulated_fills=True,
+        ),
+    )
+    engine.connect()
+    start = datetime(2024, 1, 8, 14, 30, tzinfo=timezone.utc)
+    entries = []
+    closed_positions = {}
+
+    try:
+        for session_index, opening_range_base in enumerate((100.0, 200.0)):
+            session_start = start + timedelta(days=session_index)
+            for minute in range(32):
+                timestamp = session_start + timedelta(minutes=minute)
+                if minute < 30:
+                    high = opening_range_base + 1.0
+                    low = opening_range_base - 1.0
+                    close = opening_range_base
+                elif minute == 30:
+                    high = opening_range_base + 2.0
+                    low = opening_range_base
+                    close = opening_range_base + 1.0
+                else:
+                    high = opening_range_base + 5.0
+                    low = opening_range_base + 1.0
+                    close = opening_range_base + 4.0
+
+                result = engine.process_bar(
+                    {
+                        "timestamp": timestamp,
+                        "open": close,
+                        "high": high,
+                        "low": low,
+                        "close": close,
+                        "volume": 1_000.0,
+                    }
+                )
+                if result.decisions["ORB"].action.value == "enter":
+                    entries.append(timestamp)
+                for position in engine.execution.get_closed_positions():
+                    closed_positions[id(position)] = position
+
+        assert entries == [
+            start + timedelta(minutes=30),
+            start + timedelta(days=1, minutes=30),
+        ]
+        assert len(closed_positions) == 2
+        assert orb.in_trade is False
+    finally:
+        engine.disconnect()
+
+
+@pytest.mark.parametrize(
+    ("strategy", "context"),
+    [
+        (
+            MeanReversionStrategy(MRL1_CONFIG),
+            {"hmm_state": 1, "vol_percentile": 30.0, "zscore": -3.0},
+        ),
+        (
+            S2RStrategy(
+                S2FittedModel(
+                    signal_model=S2SignalModel(
+                        thresholds={feature: 0.0 for feature in BASE_FEATURES},
+                        scales={feature: 1.0 for feature in BASE_FEATURES},
+                    ),
+                    volatility_reference=tuple(float(value) for value in range(100)),
+                )
+            ),
+            {
+                "hmm_state": 2,
+                "realized_vol_30": 50.0,
+                **{feature: -1.0 for feature in BASE_FEATURES},
+            },
+        ),
+    ],
+)
+def test_close_based_entries_fill_on_the_signal_bar(tmp_path, strategy, context):
+    engine = PaperTradingEngine(
+        strategies=[strategy],
+        execution=ExecutionEngine(),
+        risk=RiskEngine(
+            RiskLimits(
+                risk_per_trade=500.0,
+                max_total_risk=10_000.0,
+                max_daily_loss=5_000.0,
+                max_concurrent_positions=1,
+                max_daily_trades=10,
+                max_contracts=1,
+            )
+        ),
+        conflict=PortfolioConflictEngine(max_concurrent_positions=1),
+        broker=InMemoryBrokerAdapter(),
+        logger=PaperEventLogger(tmp_path / f"{strategy.name}-same-bar.jsonl"),
+        config=PaperEngineConfig(
+            initial_equity=50_000.0,
+            point_value=2.0,
+            commission_per_contract=0.0,
+            automatic_simulated_fills=True,
+        ),
+    )
+    timestamp = datetime(2024, 1, 8, 14, 30, tzinfo=timezone.utc)
+    result = None
+
+    engine.connect()
+    try:
+        result = engine.process_bar(
+            {
+                "timestamp": timestamp,
+                "open": 100.0,
+                "high": 101.0,
+                "low": 99.0,
+                "close": 100.0,
+                "volume": 1_000.0,
+                **context,
+            }
+        )
+    finally:
+        engine.disconnect()
+
+    assert result is not None
+    assert result.timestamp == timestamp
+    assert result.decisions[strategy.name].action.value == "enter"
+    assert len(result.submitted_orders) == 1
+    assert len(result.fills) == 1
+    position = engine.execution.get_position(strategy.name)
+    assert position is not None
+    assert position.entry_price == 100.0

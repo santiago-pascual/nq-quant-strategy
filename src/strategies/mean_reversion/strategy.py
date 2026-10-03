@@ -154,6 +154,16 @@ class MeanReversionStrategy(BaseStrategy):
 
         return None
 
+    def get_entry_fill_price(
+        self,
+        *,
+        signal: StrategySignal,
+        market_data: Mapping[str, Any],
+    ) -> float | None:
+        if signal not in (StrategySignal.LONG, StrategySignal.SHORT):
+            return None
+        return float(market_data["close"])
+
     def on_fill(
         self,
         *,

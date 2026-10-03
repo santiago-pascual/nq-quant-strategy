@@ -138,6 +138,9 @@ class ORBStrategy(BaseStrategy):
         self._pending_or_high = None
         self._pending_or_low = None
 
+    def on_exit(self) -> None:
+        self.finish_trade()
+
     def _update_context(self, market_data: Mapping[str, Any]) -> None:
         timestamp = pd.Timestamp(market_data["timestamp"])
         if timestamp.tzinfo is None:
