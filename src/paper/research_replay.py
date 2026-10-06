@@ -13,11 +13,14 @@ import pandas as pd
 
 from src.data_loader import load_databento_mnq
 from src.feature_engine import add_return_features, add_volatility_features
+from src.models.hmm_provider import HMMStateProvider
+from src.models.regime import HMM_FEATURES, VolatilityRegimeModel
 from src.paper.engine import PaperEngineConfig, PaperTradingEngine
 from src.paper.logger import PaperEventLogger, PaperEventType
+from src.paper.s2r_enrichment import enrich_paper_s2r_trades
 from src.portfolio.conflict import PortfolioConflictEngine
 from src.risk import RiskEngine
-from src.risk.policy import XFA_50K_PRODUCTION_POLICY
+from src.risk.policy import RESEARCH_REPLAY_RISK_POLICY
 from src.session_engine import add_session_information
 from src.strategies.mean_reversion.config import (
     MRL1_CONFIG,
@@ -27,8 +30,8 @@ from src.strategies.mean_reversion.config import (
 from src.strategies.mean_reversion.strategy import MeanReversionStrategy
 from src.strategies.orb.config import ORBConfig
 from src.strategies.orb.strategy import ORBStrategy
-from src.strategies.s2r.fitting import S2FittedModel, fit_s2_model
-from src.strategies.s2r.signal import BASE_FEATURES
+from src.strategies.s2r.fitting import S2FittedModel
+from src.strategies.s2r.signal import BASE_FEATURES, S2SignalModel
 from src.strategies.s2r.strategy import S2RStrategy
 from src.broker import InMemoryBrokerAdapter
 from src.execution import ExecutionEngine
@@ -36,10 +39,20 @@ from src.research.direction_features import add_directional_features
 from src.research.mean_reversion.features.feature_engine import (
     build_mean_reversion_features,
 )
+from src.research.s2_extended.validation.s2r_raw_reconstruction import (
+    HORIZON_BARS as S2R_HORIZON_BARS,
+    fit_signal_parameters,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "results" / "paper" / "research_replay"
+S2R_WINDOW_SCHEDULE = (
+    PROJECT_ROOT / "src" / "paper" / "config" / "research_s2r_window_schedule.csv"
+)
+# This metadata-only freeze follows s2r_raw_reconstruction.generate_windows:
+# first RTH bar + 2 years, then 3-month OOS steps and 2-year inclusive training.
+# Its universe bounds come from canonical RTH metadata, never the trade ledger.
 DEFAULT_START = "2020-06-23"
 DEFAULT_END = "2026-06-19"
 OOS_STRATEGIES = ("MRL1", "MRS2", "S2R", "ORB")
@@ -238,75 +251,144 @@ class ResearchReplayContext:
 
 
 class ResearchReplayContextAdapter:
-    """Pass Research-precomputed context through without causal inference."""
+    """TEST-ONLY adapter for frozen Research context and HMM replay inputs."""
 
-    def __init__(self, s2_models: Mapping[int, S2FittedModel] | None = None) -> None:
+    def __init__(
+        self,
+        s2_models: Mapping[int, S2FittedModel] | None = None,
+        *,
+        hmm_provider: HMMStateProvider | None = None,
+    ) -> None:
         self.context = ResearchReplayContext(dict(s2_models or {}))
+        self.hmm_provider = hmm_provider
 
     def update(self, market_data: Mapping[str, Any]) -> dict[str, Any]:
-        return dict(market_data)
+        result = dict(market_data)
+        if self.hmm_provider is not None:
+            result["hmm_state"] = self.hmm_provider.state_for(
+                pd.Timestamp(result["timestamp"]), None
+            )
+        return result
+
+
+class FrozenResearchHMMProvider:
+    """TEST-ONLY lookup of previously validated Research HMM state outputs."""
+
+    TEST_ONLY = True
+
+    def __init__(self, states: pd.DataFrame) -> None:
+        required = {"timestamp", "hmm_state"}
+        missing = required - set(states.columns)
+        if missing:
+            raise ValueError(f"Frozen HMM states missing columns: {sorted(missing)}")
+        timestamps = pd.to_datetime(states["timestamp"], utc=True, errors="raise")
+        if timestamps.duplicated().any():
+            raise ValueError("Frozen HMM states contain duplicate timestamps.")
+        values = pd.to_numeric(states["hmm_state"], errors="coerce")
+        self._states = {
+            stamp: (None if pd.isna(state) else int(state))
+            for stamp, state in zip(timestamps, values)
+        }
+
+    def state_for(
+        self,
+        timestamp: pd.Timestamp,
+        features: pd.DataFrame | None,
+    ) -> int | None:
+        del features
+        stamp = pd.Timestamp(timestamp)
+        if stamp.tzinfo is None:
+            raise ValueError("HMM provider timestamps must be timezone-aware.")
+        return self._states.get(stamp.tz_convert("UTC"))
 
 
 def _fit_s2r_models(
     market: pd.DataFrame,
-    s2r_reference: pd.DataFrame,
+    schedule_input: pd.DataFrame,
 ) -> tuple[dict[int, S2FittedModel], pd.DataFrame]:
-    schedule_columns = ["window", "validation_start", "validation_end"]
-    missing = set(schedule_columns) - set(s2r_reference.columns)
+    """Rebuild validated, window-local S2R HMMs and their fitted models.
+
+    Research Replay only: the validated Research implementation fits one
+    volatility HMM per window, then predicts states over that whole OOS
+    window. The frozen 08B provider remains available for MRL1/MRS2 context,
+    but its labels must not train or drive S2R. The whole-window decoder is
+    not a causal live fitting or refresh policy.
+    """
+    schedule_columns = ["window", "train_start", "train_end", "oos_start", "oos_end"]
+    missing = set(schedule_columns) - set(schedule_input.columns)
     if missing:
-        raise ValueError(f"S2R reference is missing schedule columns: {sorted(missing)}")
-    schedule = s2r_reference[schedule_columns].drop_duplicates().copy()
+        raise ValueError(f"S2R window schedule is missing columns: {sorted(missing)}")
+    schedule = schedule_input[schedule_columns].drop_duplicates().copy()
     schedule["window"] = pd.to_numeric(schedule["window"], errors="raise").astype(int)
-    schedule["validation_start"] = pd.to_datetime(
-        schedule["validation_start"], utc=True, errors="raise"
-    )
-    schedule["validation_end"] = pd.to_datetime(
-        schedule["validation_end"], utc=True, errors="raise"
-    )
+    for column in ("train_start", "train_end", "oos_start", "oos_end"):
+        schedule[column] = pd.to_datetime(schedule[column], utc=True, errors="raise")
     schedule = schedule.sort_values("window", kind="mergesort").reset_index(drop=True)
     if schedule["window"].duplicated().any():
-        raise ValueError("S2R reference has inconsistent metadata for a window.")
-    if (schedule["validation_end"] < schedule["validation_start"]).any():
-        raise ValueError("S2R reference has an inverted validation interval.")
+        raise ValueError("S2R window schedule has inconsistent metadata for a window.")
+    if (schedule["oos_end"] < schedule["oos_start"]).any():
+        raise ValueError("S2R window schedule has an inverted OOS interval.")
+    if (schedule["train_end"] > schedule["oos_start"]).any():
+        raise ValueError("S2R training interval extends beyond its OOS start.")
     if (
-        schedule["validation_start"].iloc[1:].reset_index(drop=True)
-        < schedule["validation_end"].iloc[:-1].reset_index(drop=True)
+        schedule["oos_start"].iloc[1:].reset_index(drop=True)
+        < schedule["oos_end"].iloc[:-1].reset_index(drop=True)
     ).any():
-        raise ValueError("S2R reference validation intervals overlap.")
+        raise ValueError("S2R OOS intervals overlap.")
 
+    # HMM predictions retain DataFrame labels for alignment; normalize the
+    # bar index so every predicted label is a positional index in the mapping.
+    market = market.reset_index(drop=True)
     timestamps = market["timestamp"]
-    windows = np.full(len(market), -1, dtype=np.int16)
+    window_memberships: list[list[int]] = [[] for _ in range(len(market))]
+    window_state_memberships: list[list[tuple[int, int]]] = [
+        [] for _ in range(len(market))
+    ]
     models: dict[int, S2FittedModel] = {}
-    train_columns = ["hmm_state", *BASE_FEATURES, "realized_vol_30"]
-    for schedule_index, item in enumerate(schedule.itertuples(index=False)):
-        start = item.validation_start
-        end = item.validation_end
-        training_start = start - pd.DateOffset(years=2)
-        inclusive_end = schedule_index == len(schedule) - 1
-        validation_mask = (
-            timestamps.ge(start)
-            & (
-                timestamps.le(end)
-                if inclusive_end
-                else timestamps.lt(end)
-            )
-        ).to_numpy()
-        if (windows[validation_mask] >= 0).any():
-            raise ValueError(f"S2R validation window {item.window} overlaps another.")
-        windows[validation_mask] = int(item.window)
+    train_columns = [*HMM_FEATURES, *BASE_FEATURES]
+    for item in schedule.itertuples(index=False):
+        start = item.oos_start
+        end = item.oos_end
+        validation_mask = timestamps.between(start, end, inclusive="both").to_numpy()
+        for row_index in np.flatnonzero(validation_mask):
+            window_memberships[int(row_index)].append(int(item.window))
 
-        train_mask = (
-            timestamps.between(training_start, start, inclusive="both")
-            & market["hmm_state"].notna()
+        train_mask = timestamps.between(
+            item.train_start, item.train_end, inclusive="both"
         )
         train = market.loc[train_mask, train_columns].copy()
         if train.empty:
             raise ValueError(
-                f"S2R window {item.window} has no frozen-state training rows."
+                f"S2R window {item.window} has no training rows."
             )
-        models[int(item.window)] = fit_s2_model(train.to_dict(orient="records"))
+        regime = VolatilityRegimeModel(n_states=3, random_state=42)
+        regime.fit(train)
+        train_states = regime.predict_states(train)
+        # Research aligns predicted states back to all training rows; rows
+        # dropped by prepare_data keep a null state but remain in the RV30
+        # reference distribution.
+        train["hmm_state"] = train_states
+        thresholds, scales, volatility_reference = fit_signal_parameters(train)
+        models[int(item.window)] = S2FittedModel(
+            signal_model=S2SignalModel(thresholds=thresholds, scales=scales),
+            volatility_reference=tuple(float(value) for value in volatility_reference),
+        )
+
+        validation = market.loc[validation_mask, train_columns].copy()
+        validation_states = regime.predict_states(validation)
+        for row_index, state in validation_states.items():
+            window_state_memberships[int(row_index)].append(
+                (int(item.window), int(state))
+            )
+    memberships = [tuple(values) for values in window_memberships]
+    primary_windows = [values[0] if len(values) == 1 else -1 for values in memberships]
+    state_memberships = [tuple(values) for values in window_state_memberships]
     return models, pd.DataFrame(
-        {"timestamp": timestamps, "s2r_window": windows}
+        {
+            "timestamp": timestamps,
+            "s2r_window": primary_windows,
+            "s2r_windows": memberships,
+            "s2r_hmm_states": state_memberships,
+        }
     )
 
 
@@ -316,18 +398,31 @@ def _mark_final_orb_rth_bars(rth: pd.DataFrame) -> pd.Series:
     config = ORBConfig()
     rth_start = config.rth_start_hour * 60 + config.rth_start_minute
     rth_end = config.rth_end_hour * 60 + config.rth_end_minute
-    orb_session_bars = rth.loc[local_minutes.ge(rth_start) & local_minutes.lt(rth_end)]
-    final_indices = orb_session_bars.groupby(
-        orb_session_bars["timestamp ET"].dt.date,
-        sort=False,
-    ).tail(1).index
-    return pd.Series(rth.index.isin(final_indices), index=rth.index, dtype=bool)
+    in_orb_rth = local_minutes.ge(rth_start) & local_minutes.lt(rth_end)
+    session_dates = timestamps.dt.date
+    final_timestamps = timestamps.loc[in_orb_rth].groupby(
+        session_dates.loc[in_orb_rth], sort=False
+    ).transform("max")
+    result = pd.Series(False, index=rth.index, dtype=bool)
+    result.loc[final_timestamps.index] = timestamps.loc[
+        final_timestamps.index
+    ].eq(final_timestamps)
+    return result
+
+
+def _mark_s2r_entry_eligible(rth: pd.DataFrame) -> pd.Series:
+    """Apply Research's minimum remaining-session-horizon entry cutoff."""
+    timestamps = rth["timestamp ET"]
+    session_dates = timestamps.dt.date
+    positions = session_dates.groupby(session_dates, sort=False).cumcount()
+    session_sizes = session_dates.groupby(session_dates, sort=False).transform("size")
+    return positions.lt(session_sizes - S2R_HORIZON_BARS).astype(bool)
 
 
 def prepare_research_market(
     raw: pd.DataFrame,
     frozen_states: pd.DataFrame,
-    s2r_reference: pd.DataFrame,
+    s2r_schedule: pd.DataFrame,
 ) -> tuple[pd.DataFrame, dict[int, S2FittedModel]]:
     """Build frozen-context features and return only the Paper Engine bar fields."""
     required = {"timestamp ET", "open", "high", "low", "close", "volume"}
@@ -358,7 +453,7 @@ def prepare_research_market(
         "close",
         "volume",
         "market_period",
-        "realized_vol_30",
+        *HMM_FEATURES,
         *BASE_FEATURES,
     ]
     market = market[feature_columns].copy()
@@ -384,7 +479,7 @@ def prepare_research_market(
         validate="one_to_one",
         sort=False,
     )
-    models, window_map = _fit_s2r_models(rth, s2r_reference)
+    models, window_map = _fit_s2r_models(rth, s2r_schedule)
     rth = rth.merge(
         window_map,
         on="timestamp",
@@ -395,9 +490,10 @@ def prepare_research_market(
     rth = rth.sort_values("timestamp", kind="mergesort").reset_index(drop=True)
     rth["hmm_window"] = rth["s2r_window"].where(rth["s2r_window"] >= 0)
     rth["is_final_rth_bar"] = _mark_final_orb_rth_bars(rth)
+    rth["s2r_entry_eligible"] = _mark_s2r_entry_eligible(rth)
     rth["timestamp"] = pd.to_datetime(rth["timestamp"], utc=True)
-    # Preserve the exact OOS state label separately for audit; Paper Engine's
-    # hmm_window is the S2R fit window consumed by its existing model hook.
+    # Preserve the Research HMM window for audit. `s2r_windows` carries every
+    # inclusive OOS owner; `hmm_window` is populated only for single-owner bars.
     rth["hmm_state"] = pd.to_numeric(rth["hmm_state"], errors="coerce")
     rth["hmm_window"] = pd.to_numeric(rth["hmm_window"], errors="coerce")
     output_columns = [
@@ -410,11 +506,14 @@ def prepare_research_market(
         "hmm_state",
         "research_hmm_window",
         "hmm_window",
+        "s2r_windows",
+        "s2r_hmm_states",
         "zscore",
         "vol_percentile",
         "realized_vol_30",
         *BASE_FEATURES,
         "is_final_rth_bar",
+        "s2r_entry_eligible",
     ]
     return rth[output_columns].reset_index(drop=True), models
 
@@ -583,7 +682,7 @@ def _normalize_exit_reason(reason: object) -> str:
     text = str(reason).strip().lower().replace("-", "_").replace(" ", "_")
     if "failed_to_recover" in text:
         return "failed_to_recover"
-    if "recover" in text:
+    if "recovered" in text or "recovery_exit" in text:
         return "recovered"
     if "target" in text or "take_profit" in text:
         return "target"
@@ -608,7 +707,12 @@ class _ReplayEventLogger(PaperEventLogger):
 
     _CAPTURED = {
         PaperEventType.STRATEGY_DECISION,
+        PaperEventType.CANDIDATE_EVALUATION,
         PaperEventType.RISK_REQUEST,
+        PaperEventType.RISK_DECISION,
+        PaperEventType.ERROR,
+        PaperEventType.ORDER_CREATED,
+        PaperEventType.ORDER_SUBMITTED,
         PaperEventType.FILL,
         PaperEventType.POSITION_OPENED,
         PaperEventType.POSITION_CLOSED,
@@ -642,6 +746,35 @@ class _ReplayEventLogger(PaperEventLogger):
         )
 
 
+def build_candidate_diagnostics(
+    events: Iterable[Mapping[str, Any]],
+) -> pd.DataFrame:
+    """Compatibility wrapper around the Research-independent Paper ledger."""
+    from src.paper.candidate_ledger import build_candidate_ledger
+
+    return build_candidate_ledger(events)
+
+
+def build_candidate_evaluation_diagnostics(
+    events: Iterable[Mapping[str, Any]],
+) -> pd.DataFrame:
+    """Return every per-window S2R evaluation, including nonqualifying ones."""
+    records = [
+        {
+            **dict(event["payload"]),
+            "timestamp": pd.Timestamp(event["timestamp"]).tz_convert("UTC"),
+        }
+        for event in events
+        if event["event_type"] == PaperEventType.CANDIDATE_EVALUATION.value
+    ]
+    columns = [
+        "evaluation_id", "strategy_name", "timestamp", "entry_timestamp",
+        "session_id", "window", "hmm_state", "qualifies", "reason",
+        "quality", "volatility_percentile",
+    ]
+    return pd.DataFrame(records, columns=columns)
+
+
 def _build_paper_engine(
     strategies: Sequence[str],
     *,
@@ -668,7 +801,7 @@ def _build_paper_engine(
     return PaperTradingEngine(
         strategies=strategy_objects,
         execution=ExecutionEngine(),
-        risk=RiskEngine(XFA_50K_PRODUCTION_POLICY.to_risk_limits()),
+        risk=RiskEngine(RESEARCH_REPLAY_RISK_POLICY.to_risk_limits()),
         conflict=PortfolioConflictEngine(max_concurrent_positions=3),
         broker=InMemoryBrokerAdapter(),
         logger=logger,
@@ -812,19 +945,24 @@ def compare_trade_ledgers(
                 left = expected.get(field)
                 right = actual.get(field)
                 if field in NUMERIC_PARITY_FIELDS:
-                    equal = (
-                        pd.isna(left)
-                        and pd.isna(right)
-                    ) or (
-                        pd.notna(left)
-                        and pd.notna(right)
-                        and np.isclose(
-                            float(left),
-                            float(right),
-                            rtol=0,
-                            atol=absolute_tolerance,
+                    if pd.isna(left) and pd.isna(right):
+                        equal = True
+                    elif pd.notna(left) and pd.notna(right) and field == "zscore":
+                        # Research 07 serializes event z-scores through float32;
+                        # compare at that artifact precision while retaining
+                        # Paper's original float64 feature value.
+                        equal = np.float32(left) == np.float32(right)
+                    else:
+                        equal = (
+                            pd.notna(left)
+                            and pd.notna(right)
+                            and np.isclose(
+                                float(left),
+                                float(right),
+                                rtol=0,
+                                atol=absolute_tolerance,
+                            )
                         )
-                    )
                 elif field.endswith("_timestamp"):
                     equal = (
                         pd.isna(left)
@@ -854,7 +992,7 @@ def compare_trade_ledgers(
         row: dict[str, Any] = {
             "trade_key": key,
             "strategy_name": (expected or actual or {}).get("strategy_name", ""),
-            "status": status,
+            "status": "EXACT" if status == "MATCH" else status,
             "first_difference_field": first_difference,
         }
         for field in PARITY_FIELDS:
@@ -924,25 +1062,91 @@ def add_paper_trade_attribution(
             )
             record["volatility_percentile_scale"] = "0..100_causal_expanding"
         elif strategy == "S2R":
-            window = int(context["hmm_window"])
-            fitted = s2_models[window]
-            values = {feature: float(context[feature]) for feature in BASE_FEATURES}
-            record["window"] = window
-            record["quality"] = fitted.signal_model.calculate_quality(values)
+            has_window_membership = "s2r_windows" in context.index
+            scheduled_windows = context.get("s2r_windows", ())
+            if has_window_membership:
+                windows = tuple(int(window) for window in scheduled_windows)
+            else:
+                windows = ()
+            if not windows and pd.notna(context["hmm_window"]):
+                windows = (int(context["hmm_window"]),)
+            features = {feature: float(context[feature]) for feature in BASE_FEATURES}
+            if has_window_membership:
+                evaluator = S2RStrategy()
+                evaluation_context = {
+                    "hmm_state": int(context["hmm_state"]),
+                    "realized_vol_30": float(context["realized_vol_30"]),
+                    **features,
+                }
+                if "s2r_hmm_states" in context.index:
+                    evaluation_context["s2r_hmm_states"] = tuple(
+                        context["s2r_hmm_states"]
+                    )
+                evaluations = [
+                    evaluator.evaluate_entry_window(
+                        evaluation_context,
+                        model=s2_models[window],
+                        window=window,
+                    )
+                    for window in windows
+                ]
+                qualifying_windows = [
+                    int(item["window"])
+                    for item in evaluations
+                    if item["qualifies"]
+                ]
+                if not qualifying_windows:
+                    raise ValueError(
+                        "Paper S2R entry has no qualifying Research window evaluation."
+                    )
+                window = (
+                    qualifying_windows[0]
+                    if len(qualifying_windows) == 1
+                    else None
+                )
+            else:
+                qualifying_windows = list(windows)
+                window = windows[0] if windows else None
+            if not qualifying_windows:
+                raise ValueError("Paper S2R entry has no fitted Research window.")
+            fitted = s2_models[qualifying_windows[0]]
+            state_by_window = dict(context.get("s2r_hmm_states", ()))
+            if qualifying_windows[0] in state_by_window:
+                record["hmm_state"] = int(state_by_window[qualifying_windows[0]])
+            record["window"] = np.nan if window is None else window
+            record["evaluated_windows"] = tuple(qualifying_windows)
+            record["quality"] = (
+                np.nan
+                if window is None
+                else fitted.signal_model.calculate_quality(features)
+            )
             record["volatility_percentile"] = fitted.transform_volatility(
                 float(context["realized_vol_30"])
+            ) if window is not None else np.nan
+            explicit_state = trade.get("s2r_recovery_state")
+            explicit_exit_type = trade.get("s2r_recovery_exit_type")
+            record["research_state"] = (
+                str(explicit_state)
+                if pd.notna(explicit_state)
+                else "NO_RECOVERY_ENRICHMENT"
             )
-            record["volatility_percentile_scale"] = "0..1_fitted_reference"
-            detail = str(trade.get("exit_reason_detail", "")).lower()
-            if "failed_to_recover" in detail:
-                record["research_state"] = "FAILED_TO_RECOVER"
-                record["research_exit_type"] = "RECOVERY"
-            elif "recovered" in detail:
-                record["research_state"] = "RECOVERED"
-                record["research_exit_type"] = "RECOVERY"
-            else:
-                record["research_state"] = "NO_RECOVERY_ENRICHMENT"
-                record["research_exit_type"] = "ORIGINAL_S2"
+            record["research_exit_type"] = (
+                str(explicit_exit_type)
+                if pd.notna(explicit_exit_type)
+                else "ORIGINAL_S2"
+            )
+            for column in (
+                "s2r_enrichment_eligible",
+                "s2r_recovery_state",
+                "s2r_recovery_exit_type",
+                "s2r_mae_r",
+                "s2r_max_mae_r",
+                "s2r_mae_bar",
+                "s2r_recovery_bar",
+                "s2r_exit_bar",
+                "s2r_strategy_R",
+            ):
+                record[column] = trade.get(column, np.nan)
             record["session_date"] = str(
                 (
                     pd.Timestamp(context["timestamp"])
@@ -950,6 +1154,7 @@ def add_paper_trade_attribution(
                     - pd.Timedelta(hours=18)
                 ).date()
             )
+            record["volatility_percentile_scale"] = "0..1_fitted_reference"
         else:
             record["session_date"] = str(
                 pd.Timestamp(context["timestamp"])
@@ -969,6 +1174,7 @@ def summarize_replay(
     strategies: Sequence[str],
     *,
     open_positions: int,
+    candidate_diagnostics: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     rows: list[dict[str, Any]] = []
     for strategy in strategies:
@@ -982,17 +1188,64 @@ def summarize_replay(
             if "strategy_name" in paper
             else paper
         )
+        strategy_candidates = (
+            candidate_diagnostics.loc[
+                candidate_diagnostics["strategy_name"].eq(strategy)
+                & candidate_diagnostics["decision_observed"]
+            ]
+            if candidate_diagnostics is not None
+            and not candidate_diagnostics.empty
+            else pd.DataFrame()
+        )
+        rejected_candidates = (
+            strategy_candidates.loc[
+                strategy_candidates["candidate_decision"].eq("REJECTED")
+            ]
+            if not strategy_candidates.empty
+            else pd.DataFrame()
+        )
+        rejection_reason_counts = (
+            {
+                str(reason): int(count)
+                for reason, count in rejected_candidates[
+                    "rejection_reason"
+                ].value_counts().sort_index().items()
+            }
+            if not rejected_candidates.empty
+            else {}
+        )
         rows.append(
             {
                 "strategy_name": strategy,
                 "reference_trades": int(
-                    strategy_parity["status"].isin(("MATCH", "MISMATCH", "MISSING")).sum()
+                    strategy_parity["status"]
+                    .isin(("EXACT", "MISMATCH", "MISSING"))
+                    .sum()
                 ),
                 "paper_closed_trades": int(len(strategy_paper)),
-                "exact_matches": int(strategy_parity["status"].eq("MATCH").sum()),
+                "exact_matches": int(strategy_parity["status"].eq("EXACT").sum()),
                 "mismatches": int(strategy_parity["status"].eq("MISMATCH").sum()),
                 "missing": int(strategy_parity["status"].eq("MISSING").sum()),
                 "extra": int(strategy_parity["status"].eq("EXTRA").sum()),
+                "candidates_generated": int(len(strategy_candidates)),
+                "accepted": int(
+                    strategy_candidates["candidate_decision"]
+                    .eq("ACCEPTED")
+                    .sum()
+                )
+                if not strategy_candidates.empty
+                else 0,
+                "rejected": int(
+                    strategy_candidates["candidate_decision"]
+                    .eq("REJECTED")
+                    .sum()
+                )
+                if not strategy_candidates.empty
+                else 0,
+                "rejection_reason_counts": json.dumps(
+                    rejection_reason_counts,
+                    sort_keys=True,
+                ),
                 "gross_pnl": float(strategy_paper["gross_pnl"].sum())
                 if not strategy_paper.empty
                 else 0.0,
@@ -1025,7 +1278,6 @@ def build_argument_parser() -> argparse.ArgumentParser:
 def run_research_replay(args: argparse.Namespace) -> dict[str, Path]:
     start, end = parse_oos_range(args.start, args.end)
     selected = (args.strategy,) if args.strategy else OOS_STRATEGIES
-    references, hashes = load_verified_references()
     frozen_states = load_frozen_hmm_states(
         FROZEN_INPUTS["hmm_states"][0],
         expected_sha256=FROZEN_INPUTS["hmm_states"][1],
@@ -1034,7 +1286,7 @@ def run_research_replay(args: argparse.Namespace) -> dict[str, Path]:
     market, s2_models = prepare_research_market(
         raw,
         frozen_states,
-        references["s2r_trades"],
+        pd.read_csv(S2R_WINDOW_SCHEDULE),
     )
     timestamps = pd.DatetimeIndex(market["timestamp"])
     replay_start = int(timestamps.searchsorted(start, side="left"))
@@ -1045,12 +1297,11 @@ def run_research_replay(args: argparse.Namespace) -> dict[str, Path]:
     # end-of-range entries are compared after their lifecycle has resolved.
     replay_end = min(oos_end + 40, len(market))
     replay_market = market.iloc[replay_start:replay_end].copy()
-    reference_trades = build_reference_trades(references, market, start, end)
-    reference_trades = reference_trades.loc[
-        reference_trades["strategy_name"].isin(selected)
-    ].reset_index(drop=True)
 
-    context_adapter = ResearchReplayContextAdapter(s2_models)
+    context_adapter = ResearchReplayContextAdapter(
+        s2_models,
+        hmm_provider=FrozenResearchHMMProvider(frozen_states),
+    )
     logger = _ReplayEventLogger()
     engine = _build_paper_engine(
         selected,
@@ -1080,6 +1331,11 @@ def run_research_replay(args: argparse.Namespace) -> dict[str, Path]:
                     else int(row.research_hmm_window)
                 ),
                 "hmm_window": window,
+                "s2r_windows": tuple(int(value) for value in row.s2r_windows),
+                "s2r_hmm_states": tuple(
+                    (int(window_id), int(state_id))
+                    for window_id, state_id in row.s2r_hmm_states
+                ),
                 "zscore": None if pd.isna(row.zscore) else float(row.zscore),
                 "vol_percentile": (
                     None if pd.isna(row.vol_percentile) else float(row.vol_percentile)
@@ -1090,6 +1346,7 @@ def run_research_replay(args: argparse.Namespace) -> dict[str, Path]:
                     else float(row.realized_vol_30)
                 ),
                 "is_final_rth_bar": bool(row.is_final_rth_bar),
+                "s2r_entry_eligible": bool(row.s2r_entry_eligible),
             }
             market_data.update(
                 {
@@ -1112,17 +1369,41 @@ def run_research_replay(args: argparse.Namespace) -> dict[str, Path]:
         paper_trades = paper_trades.loc[
             paper_trades["entry_signal_timestamp"].between(start, end, inclusive="both")
         ].reset_index(drop=True)
+        # Compute the frozen S26 analysis from Paper-generated entries and the
+        # same replay OHLC bars used by the engine. The complete replay slice
+        # remains available after a baseline position closes, so enrichment
+        # can reach its own deadline without affecting execution.
+        paper_trades = enrich_paper_s2r_trades(paper_trades, replay_market)
         paper_trades = add_paper_trade_attribution(
             paper_trades,
-            market,
+            replay_market,
             s2_models,
         )
+    # Research ledgers are loaded only after Paper execution and independent
+    # S2R enrichment are complete; they are used only for parity comparison.
+    references, hashes = load_verified_references()
+    reference_trades = build_reference_trades(references, market, start, end)
+    reference_trades = reference_trades.loc[
+        reference_trades["strategy_name"].isin(selected)
+    ].reset_index(drop=True)
     parity = compare_trade_ledgers(reference_trades, paper_trades)
+    candidate_diagnostics = build_candidate_diagnostics(logger.events)
+    candidate_evaluation_diagnostics = build_candidate_evaluation_diagnostics(
+        logger.events
+    )
+    candidate_accounting_diagnostics = candidate_diagnostics.loc[
+        candidate_diagnostics["entry_timestamp"].between(
+            start,
+            end,
+            inclusive="both",
+        )
+    ].reset_index(drop=True)
     summary = summarize_replay(
         paper_trades,
         parity,
         selected,
         open_positions=len(engine.execution.get_positions()),
+        candidate_diagnostics=candidate_accounting_diagnostics,
     )
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1130,11 +1411,17 @@ def run_research_replay(args: argparse.Namespace) -> dict[str, Path]:
         "summary": output_dir / "summary.csv",
         "trades": output_dir / "trades.csv",
         "parity": output_dir / "parity.csv",
+        "candidate_diagnostics": output_dir / "candidate_diagnostics.csv",
+        "candidate_evaluations": output_dir / "candidate_evaluations.csv",
         "run_summary": output_dir / "run_summary.json",
     }
     summary.to_csv(paths["summary"], index=False)
     paper_trades.to_csv(paths["trades"], index=False)
     parity.to_csv(paths["parity"], index=False)
+    candidate_diagnostics.to_csv(paths["candidate_diagnostics"], index=False)
+    candidate_evaluation_diagnostics.to_csv(
+        paths["candidate_evaluations"], index=False
+    )
     run_summary = {
         "start_utc": start.isoformat(),
         "end_utc": end.isoformat(),
@@ -1142,6 +1429,26 @@ def run_research_replay(args: argparse.Namespace) -> dict[str, Path]:
         "official_oos_rth_bars": int(oos_end - replay_start),
         "replay_rth_bars_including_exit_buffer": int(len(replay_market)),
         "post_end_exit_buffer_rth_bars": int(replay_end - oos_end),
+        "parity_reference_trade_count": int(len(reference_trades)),
+        "s2r_candidate_source": "frozen_research_features_and_window_models",
+        "s2r_model_schedule_source": S2R_WINDOW_SCHEDULE.name,
+        "candidate_diagnostic_status_counts": {
+            str(status): int(count)
+            for status, count in candidate_diagnostics["status"]
+            .value_counts()
+            .items()
+        },
+        "candidate_accounting": {
+            row["strategy_name"]: {
+                "candidates_generated": int(row["candidates_generated"]),
+                "accepted": int(row["accepted"]),
+                "rejected": int(row["rejected"]),
+                "rejection_reason_counts": json.loads(
+                    row["rejection_reason_counts"]
+                ),
+            }
+            for row in summary.to_dict(orient="records")
+        },
         "frozen_inputs_sha256": hashes,
         "output_files": {name: path.name for name, path in paths.items()},
         "initial_equity": args.initial_equity,

@@ -17,7 +17,7 @@ class RiskLimits:
     """
 
     risk_per_trade: float
-    max_total_risk: float
+    max_total_risk: float | None
     max_daily_loss: float
     max_concurrent_positions: int
     max_daily_trades: int
@@ -26,7 +26,7 @@ class RiskLimits:
     def __post_init__(self) -> None:
         if self.risk_per_trade <= 0:
             raise ValueError("risk_per_trade must be positive")
-        if self.max_total_risk <= 0:
+        if self.max_total_risk is not None and self.max_total_risk <= 0:
             raise ValueError("max_total_risk must be positive")
         if self.max_daily_loss <= 0:
             raise ValueError("max_daily_loss must be positive")
@@ -72,6 +72,9 @@ class RiskResult:
     risk_per_contract: float
     total_risk: float
     reason: str
+    theoretical_quantity: float = 0.0
+    executable_quantity: int = 0
+    adaptive_quantity: int | None = None
 
     @property
     def approved(self) -> bool:

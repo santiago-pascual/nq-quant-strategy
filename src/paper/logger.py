@@ -14,6 +14,7 @@ class PaperEventType(str, Enum):
     MARKET_DATA = "market_data"
     STRATEGY_SIGNAL = "strategy_signal"
     STRATEGY_DECISION = "strategy_decision"
+    CANDIDATE_EVALUATION = "candidate_evaluation"
 
     RISK_REQUEST = "risk_request"
     RISK_DECISION = "risk_decision"

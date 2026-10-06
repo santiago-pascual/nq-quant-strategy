@@ -97,6 +97,11 @@ class BaseStrategy(ABC):
 
         return None
 
+    @property
+    def single_contract_risk_cap(self) -> float | None:
+        """Return an optional ceiling for strategy-approved one-contract sizing."""
+        return None
+
     def get_entry_fill_price(
         self,
         *,

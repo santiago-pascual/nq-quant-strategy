@@ -1,6 +1,8 @@
 from .engine import RiskEngine
 from .policy import (
     ProductionRiskPolicy,
+    ResearchReplayRiskPolicy,
+    RESEARCH_REPLAY_RISK_POLICY,
     XFA_50K_PRODUCTION_POLICY,
 )
 from .types import (
@@ -12,6 +14,8 @@ from .types import (
 
 __all__ = [
     "ProductionRiskPolicy",
+    "ResearchReplayRiskPolicy",
+    "RESEARCH_REPLAY_RISK_POLICY",
     "RiskDecision",
     "RiskEngine",
     "RiskLimits",

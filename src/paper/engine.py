@@ -20,7 +20,7 @@ from src.execution import ExecutionEngine
 
 from src.paper.lifecycle import PositionLifecycleController
 
-from src.paper.logger import PaperEventLogger
+from src.paper.logger import PaperEventLogger, PaperEventType
 
 from src.paper.context_adapter import PaperMarketContextAdapter
 
@@ -471,6 +471,19 @@ class PaperTradingEngine:
         return self.context_adapter.update(market_data)
 
     def _configure_window_models(self, market_data: dict[str, Any]) -> None:
+        scheduled_windows = market_data.get("s2r_windows")
+        if scheduled_windows is not None:
+            if self.context_adapter is None:
+                raise RuntimeError("S2R Research windows require a model context adapter.")
+            windows = tuple(int(value) for value in scheduled_windows)
+            models = {
+                window: self.context_adapter.context.s2_model_for_window(window)
+                for window in windows
+            }
+            for strategy in self.strategies:
+                if isinstance(strategy, S2RStrategy):
+                    strategy.set_fitted_models_for_bar(models)
+            return
         window = market_data.get("hmm_window")
         if market_data.get("hmm_state") is None or window is None:
             return
@@ -581,6 +594,24 @@ class PaperTradingEngine:
 
             decision = lifecycle_result.decision
 
+            if isinstance(strategy, S2RStrategy):
+                for evaluation in strategy.take_window_evaluations():
+                    self.logger.append(
+                        PaperEventType.CANDIDATE_EVALUATION,
+                        {
+                            "strategy_name": strategy.name,
+                            "evaluation_id": (
+                                f"S2R|{timestamp.isoformat()}|window-{evaluation['window']}"
+                            ),
+                            "entry_timestamp": timestamp.isoformat(),
+                            "session_id": timestamp.astimezone(
+                                ZoneInfo("America/New_York")
+                            ).date().isoformat(),
+                            **evaluation,
+                        },
+                        timestamp=timestamp,
+                    )
+
             decisions[strategy.name] = decision
 
             self.logger.log_strategy_decision(
@@ -684,6 +715,32 @@ class PaperTradingEngine:
             point_value=self.config.point_value,
             account_equity=account_equity,
         )
+        risk_per_contract = (
+            abs(entry_price - stop_price) * self.config.point_value
+        )
+        risk_budget_override = None
+        adaptive_quantity = None
+        sizing_rule = {
+            "ORB": "ORB_STRICT_INTEGER",
+            "MRL1": "MR_STRICT_025",
+            "MRS2": "MR_STRICT_025",
+        }.get(strategy.name, "STRICT_RISK_BUDGET")
+        strategy_risk_cap = strategy.single_contract_risk_cap
+        if (
+            strategy.name == "ORB"
+            and strategy_risk_cap is not None
+            and risk_per_contract > self.risk.limits.risk_per_trade
+            and risk_per_contract <= strategy_risk_cap
+        ):
+            adaptive_quantity = 1
+            sizing_rule = (
+                "ORB_FORCE_1_UNDER_060"
+                if strategy.name == "ORB"
+                else "SINGLE_CONTRACT_RISK_CAP"
+            )
+        elif strategy.name == "ORB" and strategy_risk_cap is not None:
+            if risk_per_contract > strategy_risk_cap:
+                sizing_rule = "ORB_REJECT_OVER_060"
 
         self.logger.log_risk_request(
             {
@@ -692,6 +749,10 @@ class PaperTradingEngine:
                 "stop_price": stop_price,
                 "point_value": self.config.point_value,
                 "account_equity": account_equity,
+                "risk_per_contract": risk_per_contract,
+                "risk_budget_override": risk_budget_override,
+                "adaptive_quantity": adaptive_quantity,
+                "sizing_rule": sizing_rule,
             },
             timestamp=timestamp,
         )
@@ -701,6 +762,11 @@ class PaperTradingEngine:
             trading_day=timestamp.astimezone(
                 ZoneInfo("America/New_York")
             ).date(),
+            risk_per_trade_budget=risk_budget_override,
+            adaptive_quantity=adaptive_quantity,
+            adaptive_risk_limit=(
+                strategy_risk_cap if adaptive_quantity is not None else None
+            ),
         )
 
         self.logger.log_risk_decision(
@@ -712,6 +778,11 @@ class PaperTradingEngine:
                 "risk_per_contract": risk_result.risk_per_contract,
                 "total_risk": risk_result.total_risk,
                 "reason": risk_result.reason,
+                "risk_budget_override": risk_budget_override,
+                "theoretical_quantity": risk_result.theoretical_quantity,
+                "executable_quantity": risk_result.executable_quantity,
+                "adaptive_quantity": risk_result.adaptive_quantity,
+                "sizing_rule": sizing_rule,
             },
             timestamp=timestamp,
         )

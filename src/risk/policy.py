@@ -27,7 +27,7 @@ class ProductionRiskPolicy:
     risk_fraction: float = 0.0025
 
     # Internal portfolio controls.
-    max_total_risk_fraction: float = 0.0075
+    max_total_risk_fraction: float | None = 0.0075
     max_concurrent_positions: int = 3
     max_daily_trades: int = 10
 
@@ -51,7 +51,10 @@ class ProductionRiskPolicy:
         if self.risk_fraction <= 0:
             raise ValueError("risk_fraction must be positive")
 
-        if self.max_total_risk_fraction <= 0:
+        if (
+            self.max_total_risk_fraction is not None
+            and self.max_total_risk_fraction <= 0
+        ):
             raise ValueError("max_total_risk_fraction must be positive")
 
         if self.max_concurrent_positions <= 0:
@@ -66,7 +69,10 @@ class ProductionRiskPolicy:
         if self.max_contracts <= 0:
             raise ValueError("max_contracts must be positive")
 
-        if self.max_total_risk < self.risk_per_trade:
+        if (
+            self.max_total_risk is not None
+            and self.max_total_risk < self.risk_per_trade
+        ):
             raise ValueError("max_total_risk must be >= risk_per_trade")
 
     @property
@@ -79,13 +85,15 @@ class ProductionRiskPolicy:
         return self.account_size * self.risk_fraction
 
     @property
-    def max_total_risk(self) -> float:
+    def max_total_risk(self) -> float | None:
         """
         Maximum aggregate planned risk across simultaneously open
         positions.
 
         50,000 * 0.75% = $375.
         """
+        if self.max_total_risk_fraction is None:
+            return None
         return self.account_size * self.max_total_risk_fraction
 
     def to_risk_limits(self) -> RiskLimits:
@@ -104,3 +112,13 @@ class ProductionRiskPolicy:
 
 
 XFA_50K_PRODUCTION_POLICY = ProductionRiskPolicy()
+
+
+@dataclass(frozen=True)
+class ResearchReplayRiskPolicy(ProductionRiskPolicy):
+    """Research-equivalent sizing without the production aggregate-risk cap."""
+
+    max_total_risk_fraction: float | None = None
+
+
+RESEARCH_REPLAY_RISK_POLICY = ResearchReplayRiskPolicy()

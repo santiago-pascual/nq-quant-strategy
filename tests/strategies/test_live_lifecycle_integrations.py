@@ -9,6 +9,7 @@ from src.strategies.mean_reversion.strategy import MeanReversionStrategy
 from src.strategies.orb.strategy import ORBStrategy
 from src.strategies.s2r.config import S2RConfig
 from src.strategies.s2r.fitting import S2FittedModel
+from src.strategies.s2r.recovery import RecoveryState
 from src.strategies.s2r.signal import BASE_FEATURES, S2SignalModel
 from src.strategies.s2r.strategy import S2RStrategy
 
@@ -51,7 +52,7 @@ def test_s2r_uses_training_fitted_volatility_scale_not_context_percentile():
     assert strategy.generate_signal(market_data) is StrategySignal.SHORT
 
 
-def test_s2r_recovery_lifecycle_exits_at_recovery_deadline():
+def test_s2r_recovery_deadline_does_not_preempt_baseline_timeout():
     signal_model = S2SignalModel(
         thresholds={feature: 0.0 for feature in BASE_FEATURES},
         scales={feature: 1.0 for feature in BASE_FEATURES},
@@ -71,13 +72,16 @@ def test_s2r_recovery_lifecycle_exits_at_recovery_deadline():
     )
     assert first.action is StrategyAction.HOLD
     last = first
-    for _ in range(6):
+    for bar_index in range(2, 21):
         last = strategy.on_market_data(
             {"high": 100.0, "low": 100.0, "close": 100.0},
             position,
         )
+        if bar_index < 20:
+            assert last.action is StrategyAction.HOLD
+    assert strategy.recovery_state is RecoveryState.FAILED_TO_RECOVER
     assert last.action is StrategyAction.EXIT
-    assert "failed_to_recover" in (last.reason or "")
+    assert last.reason.startswith("S2 baseline timeout")
 
 
 def test_orb_live_path_uses_new_york_time_and_explicit_touch_lifecycle():

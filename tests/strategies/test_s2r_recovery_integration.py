@@ -52,7 +52,8 @@ def test_recovery_exit_after_recovery():
     decision = strategy.evaluate({})
 
     assert decision.signal is StrategySignal.FLAT
-    assert decision.action is StrategyAction.EXIT
+    assert decision.action is StrategyAction.HOLD
+    assert strategy.recovery_decision.recovery_bar == 1
 
 
 def test_recovery_exit_after_deadline():
@@ -83,7 +84,8 @@ def test_recovery_exit_after_deadline():
     decision = strategy.evaluate({})
 
     assert decision.signal is StrategySignal.FLAT
-    assert decision.action is StrategyAction.EXIT
+    assert decision.action is StrategyAction.HOLD
+    assert strategy.recovery_decision.exit_bar == 6
 
 
 def test_active_recovery_blocks_new_entry():
@@ -175,6 +177,50 @@ def test_s2r_baseline_times_out_after_20_bars_on_reference_session():
             assert strategy.recovery_state is RecoveryState.INITIAL
 
 
+def test_20210728_s2r_original_benchmark_path_times_out_without_recovery():
+    strategy = S2RStrategy(fitted_model=fitted_model())
+    entry_price = 14_987.75
+    strategy.start_trade(entry_price=entry_price, entry_bar=0)
+    # (high, low, close) for the 20 completed bars after the 20:05 UTC entry.
+    bars = [
+        (14994.00, 14986.25, 14990.75),
+        (14992.75, 14985.50, 14986.00),
+        (14989.00, 14984.00, 14985.00),
+        (14986.50, 14981.25, 14981.50),
+        (14989.00, 14981.00, 14988.50),
+        (14991.25, 14986.75, 14986.75),
+        (14988.50, 14985.25, 14987.25),
+        (14999.00, 14987.50, 14996.75),
+        (15000.00, 14993.00, 14995.75),
+        (14995.50, 14992.00, 14994.75),
+        (14996.50, 14987.00, 14989.00),
+        (14989.50, 14985.00, 14987.00),
+        (14989.00, 14981.25, 14982.25),
+        (14985.75, 14980.25, 14984.75),
+        (14985.75, 14981.00, 14982.50),
+        (14982.50, 14976.75, 14979.75),
+        (14983.50, 14980.25, 14981.75),
+        (14983.25, 14980.00, 14980.25),
+        (14980.75, 14978.75, 14979.50),
+        (14980.75, 14977.75, 14977.75),
+    ]
+    decision = None
+    for bar_index, (high, low, close) in enumerate(bars, start=1):
+        decision = strategy.on_market_data(
+            {"high": high, "low": low, "close": close}, position=object()
+        )
+        if bar_index < 20:
+            assert decision.action is StrategyAction.HOLD
+
+    assert decision is not None
+    assert decision.action is StrategyAction.EXIT
+    assert decision.reason == (
+        "S2 baseline timeout (NO_RECOVERY_ENRICHMENT / ORIGINAL_S2)"
+    )
+    assert strategy.get_exit_fill_price(market_data={"close": 14977.75}) == 14977.75
+    assert strategy.recovery_state is RecoveryState.INITIAL
+
+
 def test_s2r_baseline_stop_and_target_exit_at_frozen_prices():
     cases = [
         (
@@ -212,7 +258,7 @@ def test_s2r_baseline_uses_stop_when_stop_and_target_hit_together():
     assert strategy.get_exit_fill_price(market_data=market_data) == 125.0
 
 
-def test_s2r_recovery_exit_keeps_precedence_over_baseline_exit():
+def test_s2r_recovery_metadata_does_not_preempt_same_bar_baseline_stop():
     strategy = S2RStrategy(fitted_model=fitted_model())
     strategy.start_trade(entry_price=100.0, entry_bar=0)
 
@@ -220,19 +266,19 @@ def test_s2r_recovery_exit_keeps_precedence_over_baseline_exit():
         {"high": 117.5, "low": 99.0, "close": 110.0},
         position=object(),
     )
-    recovered = strategy.on_market_data(
+    recovered_and_stopped = strategy.on_market_data(
         {"high": 125.0, "low": 94.0, "close": 94.0},
         position=object(),
     )
 
     assert adverse.action is StrategyAction.HOLD
-    assert recovered.action is StrategyAction.EXIT
-    assert recovered.reason == "S2R recovery recovered"
-    assert strategy.get_exit_fill_price(market_data={"close": 94.0}) == 94.0
+    assert recovered_and_stopped.action is StrategyAction.EXIT
+    assert recovered_and_stopped.reason.startswith("S2 baseline stop")
+    assert strategy.get_exit_fill_price(market_data={"close": 94.0}) == 125.0
     assert strategy.recovery_state is RecoveryState.RECOVERED
 
 
-def test_s2r_adverse_trade_waits_through_baseline_stop_until_recovery_deadline():
+def test_s2r_baseline_stop_remains_executable_while_recovery_is_adverse():
     strategy = S2RStrategy(fitted_model=fitted_model())
     strategy.start_trade(entry_price=100.0, entry_bar=0)
 
@@ -259,11 +305,70 @@ def test_s2r_adverse_trade_waits_through_baseline_stop_until_recovery_deadline()
         {"high": 126.0, "low": 99.0, "close": 124.0},
         position=object(),
     )
-    assert baseline_stop_bar.action is StrategyAction.HOLD
+    assert baseline_stop_bar.action is StrategyAction.EXIT
+    assert baseline_stop_bar.reason.startswith("S2 baseline stop")
+    assert strategy.get_exit_fill_price(
+        market_data={"close": 124.0}
+    ) == 125.0
+    assert strategy.recovery_state is RecoveryState.ADVERSE
 
-    deadline_bar = {"high": 127.0, "low": 99.0, "close": 129.0}
-    deadline = strategy.on_market_data(deadline_bar, position=object())
-    assert deadline.action is StrategyAction.EXIT
-    assert deadline.reason == "S2R recovery failed_to_recover"
-    assert strategy.get_exit_fill_price(market_data=deadline_bar) == 129.0
+
+def test_s2r_recovery_failure_before_later_baseline_stop_does_not_exit():
+    strategy = S2RStrategy(fitted_model=fitted_model())
+    strategy.start_trade(entry_price=100.0, entry_bar=0)
+
+    adverse = strategy.on_market_data(
+        {"high": 118.0, "low": 99.0, "close": 110.0},
+        position=object(),
+    )
+    assert adverse.action is StrategyAction.HOLD
+    for _ in range(6):
+        decision = strategy.on_market_data(
+            {"high": 110.0, "low": 99.0, "close": 110.0},
+            position=object(),
+        )
+        assert decision.action is StrategyAction.HOLD
     assert strategy.recovery_state is RecoveryState.FAILED_TO_RECOVER
+
+    stop_bar = {"high": 126.0, "low": 99.0, "close": 124.0}
+    decision = strategy.on_market_data(stop_bar, position=object())
+    assert decision.action is StrategyAction.EXIT
+    assert decision.reason.startswith("S2 baseline stop")
+    assert strategy.get_exit_fill_price(market_data=stop_bar) == 125.0
+
+
+def test_s2r_baseline_timeout_remains_executable_after_recovery_failure():
+    strategy = S2RStrategy(fitted_model=fitted_model())
+    strategy.start_trade(entry_price=100.0, entry_bar=0)
+
+    for bar_index in range(1, 21):
+        market_data = {"high": 118.0 if bar_index == 1 else 110.0,
+                       "low": 99.0, "close": 110.0}
+        decision = strategy.on_market_data(market_data, position=object())
+        if bar_index < 20:
+            assert decision.action is StrategyAction.HOLD
+    assert strategy.recovery_state is RecoveryState.FAILED_TO_RECOVER
+    assert decision.action is StrategyAction.EXIT
+    assert decision.reason.startswith("S2 baseline timeout")
+    assert strategy.get_exit_fill_price(market_data=market_data) == 110.0
+
+
+def test_s2r_unenriched_baseline_trade_never_exits_on_recovery_failure():
+    """A NO_RECOVERY_ENRICHMENT baseline trade remains executable by S2 rules."""
+    strategy = S2RStrategy(fitted_model=fitted_model())
+    strategy.start_trade(entry_price=100.0, entry_bar=0)
+
+    for bar_index in range(1, 8):
+        market_data = {"high": 118.0 if bar_index == 1 else 110.0,
+                       "low": 99.0, "close": 110.0}
+        decision = strategy.on_market_data(market_data, position=object())
+        assert decision.action is StrategyAction.HOLD
+    assert strategy.recovery_state is RecoveryState.FAILED_TO_RECOVER
+
+    baseline_stop = {"high": 126.0, "low": 99.0, "close": 124.0}
+    decision = strategy.on_market_data(baseline_stop, position=object())
+    assert decision.action is StrategyAction.EXIT
+    assert decision.reason.startswith(
+        "S2 baseline stop (NO_RECOVERY_ENRICHMENT / ORIGINAL_S2)"
+    )
+    assert strategy.get_exit_fill_price(market_data=baseline_stop) == 125.0

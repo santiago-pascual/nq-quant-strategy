@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date
+from math import floor, isclose
 
 from .types import RiskDecision, RiskLimits, RiskRequest, RiskResult
 
@@ -68,64 +69,160 @@ class RiskEngine:
         request: RiskRequest,
         *,
         trading_day: date,
+        risk_per_trade_budget: float | None = None,
+        adaptive_quantity: int | None = None,
+        adaptive_risk_limit: float | None = None,
     ) -> RiskResult:
         """Size and authorize a proposed position.
 
-        Quantity is determined exclusively from the configured risk limits
-        and proposed entry/stop distance.
+        Quantity is determined from the configured risk limit and proposed
+        entry/stop distance. Callers may request an explicit adaptive
+        quantity; it remains subject to all account-level limits.
 
         Actual open exposure is registered later through execution fills.
         """
 
         self.reset_day(trading_day)
 
+        risk_per_contract = (
+            abs(request.entry_price - request.stop_price) * request.point_value
+        )
+        risk_budget = (
+            self.limits.risk_per_trade
+            if risk_per_trade_budget is None
+            else float(risk_per_trade_budget)
+        )
+        if risk_budget <= 0:
+            raise ValueError("risk_per_trade_budget must be positive.")
+
+        theoretical_quantity = risk_budget / risk_per_contract
+        quantity = floor(theoretical_quantity)
+        nearest_quantity = round(theoretical_quantity)
+        if (
+            nearest_quantity > quantity
+            and isclose(
+                theoretical_quantity,
+                nearest_quantity,
+                rel_tol=1e-12,
+                abs_tol=1e-12,
+            )
+            and isclose(
+                nearest_quantity * risk_per_contract,
+                risk_budget,
+                rel_tol=1e-12,
+                abs_tol=1e-9,
+            )
+        ):
+            quantity = nearest_quantity
+        executable_quantity = min(quantity, self.limits.max_contracts)
+
+        if adaptive_quantity is not None and (
+            isinstance(adaptive_quantity, bool)
+            or not isinstance(adaptive_quantity, int)
+            or adaptive_quantity <= 0
+        ):
+            raise ValueError("adaptive_quantity must be a positive integer.")
+        if adaptive_quantity is not None and (
+            adaptive_risk_limit is None or adaptive_risk_limit <= 0
+        ):
+            raise ValueError(
+                "adaptive_risk_limit must be positive when adaptive_quantity is set."
+            )
+
         if self._daily_realized_pnl <= -self.limits.max_daily_loss:
             return self._reject(
                 request,
                 "daily loss limit reached",
+                risk_per_contract=risk_per_contract,
+                theoretical_quantity=theoretical_quantity,
+                executable_quantity=executable_quantity,
+                adaptive_quantity=adaptive_quantity,
             )
 
         if request.strategy_name in self._open_positions:
             return self._reject(
                 request,
                 "strategy already has an open position",
+                risk_per_contract=risk_per_contract,
+                theoretical_quantity=theoretical_quantity,
+                executable_quantity=executable_quantity,
+                adaptive_quantity=adaptive_quantity,
             )
 
         if self.open_position_count >= self.limits.max_concurrent_positions:
             return self._reject(
                 request,
                 "maximum concurrent positions reached",
+                risk_per_contract=risk_per_contract,
+                theoretical_quantity=theoretical_quantity,
+                executable_quantity=executable_quantity,
+                adaptive_quantity=adaptive_quantity,
             )
 
         if self._daily_trade_count >= self.limits.max_daily_trades:
             return self._reject(
                 request,
                 "maximum daily trades reached",
+                risk_per_contract=risk_per_contract,
+                theoretical_quantity=theoretical_quantity,
+                executable_quantity=executable_quantity,
+                adaptive_quantity=adaptive_quantity,
             )
 
-        risk_per_contract = (
-            abs(request.entry_price - request.stop_price) * request.point_value
-        )
-
-        quantity = int(self.limits.risk_per_trade // risk_per_contract)
-
-        if quantity <= 0:
+        if adaptive_quantity is None and executable_quantity <= 0:
             return self._reject(
                 request,
                 "stop distance is too large for the configured risk per trade",
                 risk_per_contract=risk_per_contract,
+                theoretical_quantity=theoretical_quantity,
+                executable_quantity=executable_quantity,
             )
 
-        quantity = min(quantity, self.limits.max_contracts)
+        quantity = (
+            executable_quantity
+            if adaptive_quantity is None
+            else adaptive_quantity
+        )
+        if quantity > self.limits.max_contracts:
+            return self._reject(
+                request,
+                "maximum contracts limit would be exceeded",
+                risk_per_contract=risk_per_contract,
+                theoretical_quantity=theoretical_quantity,
+                executable_quantity=executable_quantity,
+                adaptive_quantity=adaptive_quantity,
+            )
+
         total_risk = quantity * risk_per_contract
 
-        if self.open_risk + total_risk > self.limits.max_total_risk:
+        if (
+            adaptive_quantity is not None
+            and total_risk > float(adaptive_risk_limit)
+        ):
+            return self._reject(
+                request,
+                "adaptive risk limit would be exceeded",
+                quantity=quantity,
+                risk_per_contract=risk_per_contract,
+                total_risk=total_risk,
+                theoretical_quantity=theoretical_quantity,
+                executable_quantity=executable_quantity,
+                adaptive_quantity=adaptive_quantity,
+            )
+
+        if (
+            self.limits.max_total_risk is not None
+            and self.open_risk + total_risk > self.limits.max_total_risk
+        ):
             return self._reject(
                 request,
                 "maximum aggregate open risk would be exceeded",
                 quantity=quantity,
                 risk_per_contract=risk_per_contract,
                 total_risk=total_risk,
+                theoretical_quantity=theoretical_quantity,
+                executable_quantity=executable_quantity,
+                adaptive_quantity=adaptive_quantity,
             )
 
         return RiskResult(
@@ -135,6 +232,9 @@ class RiskEngine:
             risk_per_contract=risk_per_contract,
             total_risk=total_risk,
             reason="risk checks passed",
+            theoretical_quantity=theoretical_quantity,
+            executable_quantity=executable_quantity,
+            adaptive_quantity=adaptive_quantity,
         )
 
     def register_entry_fill(
@@ -171,6 +271,8 @@ class RiskEngine:
                 raise RuntimeError("maximum concurrent positions reached")
 
             if (
+                self.limits.max_total_risk is not None
+                and
                 self.open_risk + (fill_quantity * result.risk_per_contract)
                 > self.limits.max_total_risk
             ):
@@ -201,7 +303,10 @@ class RiskEngine:
 
         additional_risk = fill_quantity * result.risk_per_contract
 
-        if self.open_risk + additional_risk > self.limits.max_total_risk:
+        if (
+            self.limits.max_total_risk is not None
+            and self.open_risk + additional_risk > self.limits.max_total_risk
+        ):
             raise RuntimeError("maximum aggregate open risk reached")
 
         position.quantity = new_quantity
@@ -275,6 +380,9 @@ class RiskEngine:
         quantity: int = 0,
         risk_per_contract: float = 0.0,
         total_risk: float = 0.0,
+        theoretical_quantity: float = 0.0,
+        executable_quantity: int = 0,
+        adaptive_quantity: int | None = None,
     ) -> RiskResult:
         return RiskResult(
             decision=RiskDecision.REJECTED,
@@ -283,4 +391,7 @@ class RiskEngine:
             risk_per_contract=risk_per_contract,
             total_risk=total_risk,
             reason=reason,
+            theoretical_quantity=theoretical_quantity,
+            executable_quantity=executable_quantity,
+            adaptive_quantity=adaptive_quantity,
         )

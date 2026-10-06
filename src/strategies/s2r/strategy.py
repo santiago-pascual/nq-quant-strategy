@@ -44,6 +44,8 @@ class S2RStrategy(BaseStrategy):
         self.config = config or S2RConfig()
         self.fitted_model = fitted_model
         self.model_window: int | None = None
+        self._window_models_for_bar: dict[int, S2FittedModel] = {}
+        self._window_evaluations: list[dict[str, Any]] = []
 
         self._entry_rule = S2SignalRule(
             target_state=self.config.target_state,
@@ -92,65 +94,141 @@ class S2RStrategy(BaseStrategy):
     ) -> StrategySignal:
         """Generate the frozen S2 short-entry signal."""
 
+        self._window_evaluations = []
         if self._in_trade:
             return StrategySignal.FLAT
-        if self.fitted_model is None:
+        models = self._window_models_for_bar or (
+            {self.model_window: self.fitted_model}
+            if self.fitted_model is not None
+            else {}
+        )
+        if "s2r_entry_eligible" in market_data and not bool(
+            market_data["s2r_entry_eligible"]
+        ):
+            for window, _model in sorted(models.items()):
+                if "s2r_hmm_states" in market_data:
+                    hmm_state = dict(market_data["s2r_hmm_states"]).get(window)
+                else:
+                    hmm_state = market_data.get("hmm_state")
+                self._window_evaluations.append(
+                    {
+                        "window": window,
+                        "hmm_state": hmm_state,
+                        "qualifies": False,
+                        "reason": "research_horizon_cutoff",
+                        "quality": None,
+                        "volatility_percentile": None,
+                    }
+                )
+            return StrategySignal.FLAT
+        if not models:
             return StrategySignal.FLAT
 
-        hmm_state = market_data.get("hmm_state")
+        # The Research window model changes the entry gate only. All qualifying
+        # evaluations at this one bar share the fixed S2R short side, session,
+        # and lifecycle, so they produce one economic entry intent. Window
+        # identity remains available in the per-window evaluation diagnostics.
+        qualifies_any = False
+        for window, model in sorted(models.items()):
+            evaluation = self.evaluate_entry_window(
+                market_data,
+                model=model,
+                window=window,
+            )
+            self._window_evaluations.append(evaluation)
+            qualifies_any = qualifies_any or bool(evaluation["qualifies"])
+        return StrategySignal.SHORT if qualifies_any else StrategySignal.FLAT
 
+    def evaluate_entry_window(
+        self,
+        market_data: Mapping[str, Any],
+        *,
+        model: S2FittedModel,
+        window: int | None,
+    ) -> dict[str, Any]:
+        """Evaluate one frozen Research window without creating an order."""
+        # Research Replay supplies a distinct state prediction for each
+        # window-local S2R HMM. If that mapping is present, a missing window
+        # state must not fall back to the shared MRL/MRS HMM provider.
+        if "s2r_hmm_states" in market_data:
+            hmm_state = dict(market_data["s2r_hmm_states"]).get(window)
+        else:
+            # Keep direct strategy use and existing callers provider-agnostic.
+            hmm_state = market_data.get("hmm_state")
         if not isinstance(hmm_state, int):
-            return StrategySignal.FLAT
-
-        features = {
-            feature: market_data.get(feature)
-            for feature in self.fitted_model.signal_model.thresholds
-        }
-
-        if not self.fitted_model.signal_model.base_signal(features):
-            return StrategySignal.FLAT
-
-        quality = self.fitted_model.signal_model.calculate_quality(features)
-
+            return {"window": window, "hmm_state": hmm_state, "qualifies": False,
+                    "reason": "missing_target_state", "quality": None,
+                    "volatility_percentile": None}
+        features = {feature: market_data.get(feature)
+                    for feature in model.signal_model.thresholds}
+        if not model.signal_model.base_signal(features):
+            return {"window": window, "hmm_state": hmm_state, "qualifies": False,
+                    "reason": "base_signal_failed", "quality": None,
+                    "volatility_percentile": None}
+        quality = model.signal_model.calculate_quality(features)
         realized_vol = market_data.get("realized_vol_30")
-        volatility_percentile = self.fitted_model.transform_volatility(realized_vol)
-
-        if self._entry_rule.qualifies(
+        volatility_percentile = model.transform_volatility(realized_vol)
+        qualifies = self._entry_rule.qualifies(
             hmm_state=hmm_state,
             quality=quality,
             volatility_percentile=volatility_percentile,
-        ):
-            return StrategySignal.SHORT
+        )
+        if qualifies:
+            reason = "qualified"
+        elif hmm_state != self.config.target_state:
+            reason = "target_state_mismatch"
+        elif quality is None or quality < self.config.quality_threshold:
+            reason = "quality_threshold_not_met"
+        else:
+            reason = "volatility_percentile_outside_window"
+        return {
+            "window": window,
+            "hmm_state": hmm_state,
+            "qualifies": bool(qualifies),
+            "reason": reason,
+            "quality": None if quality is None else float(quality),
+            "volatility_percentile": (
+                None
+                if volatility_percentile is None
+                else float(volatility_percentile)
+            ),
+        }
 
-        return StrategySignal.FLAT
+    def set_fitted_models_for_bar(
+        self,
+        models: Mapping[int, S2FittedModel],
+    ) -> None:
+        """Set all Research windows owning this physical bar."""
+        self._window_models_for_bar = {int(key): value for key, value in models.items()}
+        if len(self._window_models_for_bar) == 1:
+            self.model_window, self.fitted_model = next(
+                iter(self._window_models_for_bar.items())
+            )
+        elif self._window_models_for_bar:
+            self.model_window = None
+            self.fitted_model = None
+        else:
+            self.model_window = None
+            self.fitted_model = None
+
+    def take_window_evaluations(self) -> list[dict[str, Any]]:
+        evaluations = self._window_evaluations
+        self._window_evaluations = []
+        return evaluations
 
     def evaluate(
         self,
         market_data: Mapping[str, Any],
     ) -> StrategyDecision:
         """
-        Evaluate both the active recovery state and new-entry conditions.
-
-        Recovery exits have priority over new entries.
+        Report an active baseline position or evaluate new-entry conditions.
         """
 
         if self._in_trade:
-            if self.recovery_state in (
-                RecoveryState.RECOVERED,
-                RecoveryState.FAILED_TO_RECOVER,
-            ):
-                return StrategyDecision(
-                    signal=StrategySignal.FLAT,
-                    action=StrategyAction.EXIT,
-                    reason=(
-                        f"S2R recovery resolved trade: {self.recovery_state.value}."
-                    ),
-                )
-
             return StrategyDecision(
                 signal=StrategySignal.FLAT,
                 action=StrategyAction.HOLD,
-                reason="S2R trade active; recovery is being tracked.",
+                reason="S2 baseline trade active; recovery is metadata only.",
             )
 
         signal = self.generate_signal(market_data)
@@ -293,29 +371,13 @@ class S2RStrategy(BaseStrategy):
         if position is None or not self._in_trade:
             raise RuntimeError("S2R lifecycle has no active trade state.")
         self._last_bar_index += 1
-        recovery_was_adverse = self.recovery_state is RecoveryState.ADVERSE
-        result = self.update_trade_from_market(
+        # Recovery remains an analytical state stream. It must never suppress
+        # or replace the validated S2 baseline stop, target, or timeout.
+        self.update_trade_from_market(
             bar_index=self._last_bar_index,
             high=float(market_data["high"]),
             close=float(market_data["close"]),
         )
-        if result.state in (
-            RecoveryState.RECOVERED,
-            RecoveryState.FAILED_TO_RECOVER,
-        ):
-            self._pending_exit_price = float(market_data["close"])
-            return StrategyDecision(
-                signal=StrategySignal.FLAT,
-                action=StrategyAction.EXIT,
-                reason=f"S2R recovery {result.state.value}",
-            )
-
-        if recovery_was_adverse:
-            return StrategyDecision(
-                signal=StrategySignal.FLAT,
-                action=StrategyAction.HOLD,
-                reason="S2R adverse trade is awaiting its recovery deadline.",
-            )
 
         stop_price = self._entry_price + float(self.config.stop_points)
         target_price = self._entry_price - (
@@ -383,5 +445,6 @@ class S2RStrategy(BaseStrategy):
         *,
         window: int,
     ) -> None:
+        self._window_models_for_bar = {}
         self.fitted_model = fitted_model
         self.model_window = int(window)

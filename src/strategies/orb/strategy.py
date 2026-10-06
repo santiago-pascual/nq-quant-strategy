@@ -40,6 +40,8 @@ class ORBStrategy(BaseStrategy):
     Modular Opening Range Breakout strategy.
     """
 
+    SINGLE_CONTRACT_RISK_CAP = 300.0
+
     def __init__(
         self,
         config: ORBConfig | None = None,
@@ -61,6 +63,10 @@ class ORBStrategy(BaseStrategy):
     @property
     def version(self) -> str:
         return self.config.version
+
+    @property
+    def single_contract_risk_cap(self) -> float:
+        return self.SINGLE_CONTRACT_RISK_CAP
 
     @property
     def in_trade(self) -> bool:
@@ -223,6 +229,12 @@ class ORBStrategy(BaseStrategy):
         if position is None or self._trade_state is None:
             raise RuntimeError("ORB lifecycle has no active trade state.")
         self._update_context(market_data)
+        if self._context is None or not self._context.is_rth:
+            return StrategyDecision(
+                signal=StrategySignal.FLAT,
+                action=StrategyAction.HOLD,
+                reason="ORB lifecycle waits for regular-hours bars",
+            )
         is_rth_close = is_final_rth_bar(market_data, self.config)
         result = self._lifecycle.evaluate_bar(
             self._trade_state,

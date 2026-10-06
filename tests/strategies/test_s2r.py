@@ -41,7 +41,7 @@ def _fitted_s2_model() -> S2FittedModel:
     )
 
 
-def test_s2r_emits_exit_after_recovery() -> None:
+def test_s2r_recovery_metadata_does_not_exit_the_baseline_trade() -> None:
     strategy = S2RStrategy(
         fitted_model=_fitted_s2_model(),
     )
@@ -66,11 +66,12 @@ def test_s2r_emits_exit_after_recovery() -> None:
     decision = strategy.evaluate({})
 
     assert decision.signal is StrategySignal.FLAT
-    assert decision.action is StrategyAction.EXIT
+    assert decision.action is StrategyAction.HOLD
     assert strategy.recovery_state is RecoveryState.RECOVERED
+    assert strategy.recovery_decision.recovery_bar == 1
 
 
-def test_s2r_emits_exit_after_recovery_deadline() -> None:
+def test_s2r_failed_recovery_metadata_does_not_exit_the_baseline_trade() -> None:
     strategy = S2RStrategy(
         fitted_model=_fitted_s2_model(),
     )
@@ -96,8 +97,9 @@ def test_s2r_emits_exit_after_recovery_deadline() -> None:
     decision = strategy.evaluate({})
 
     assert decision.signal is StrategySignal.FLAT
-    assert decision.action is StrategyAction.EXIT
+    assert decision.action is StrategyAction.HOLD
     assert strategy.recovery_state is RecoveryState.FAILED_TO_RECOVER
+    assert strategy.recovery_decision.exit_bar == 6
 
 
 def test_s2r_does_not_enter_while_recovery_trade_is_active() -> None:
