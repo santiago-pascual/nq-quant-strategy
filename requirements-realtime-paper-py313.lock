@@ -1,0 +1,16 @@
+# Runtime pins observed on Windows 11 x86_64 / CPython 3.13.15.
+# The same versions have Linux x86_64/aarch64 wheels for the core numerical
+# stack, but Linux installation/runtime has NOT been exercised in this repo.
+hmmlearn==0.3.3
+joblib==1.5.3
+narwhals==2.25.0
+numpy==2.5.1
+pandas==3.0.5
+pyarrow==25.0.1
+python-dateutil==2.9.0.post0
+scikit-learn==1.9.0
+scipy==1.18.1
+six==1.17.0
+threadpoolctl==3.6.0
+tzdata==2026.3
+xgboost==3.4.1

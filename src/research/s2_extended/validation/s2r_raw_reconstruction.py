@@ -589,6 +589,12 @@ def run_s26(s4_cohort: pd.DataFrame) -> pd.DataFrame:
 
 
 def trade_key(row: pd.Series) -> tuple[pd.Timestamp, pd.Timestamp, str]:
+    """Return the validated S2R economic identity.
+
+    The reconstruction is strategy-scoped (S2R) and every S2 candidate is
+    short. Identity is exactly entry timestamp, exit timestamp, and session
+    ID. Window/model number is attribution metadata and is not part of the key.
+    """
     entry = pd.to_datetime(row["entry_timestamp"], utc=True, errors="coerce")
     exit_time = pd.to_datetime(row["exit_timestamp"], utc=True, errors="coerce")
     if pd.isna(entry) or pd.isna(exit_time):

@@ -28,6 +28,14 @@ src/research/**/results/
 *.pkl
 *.pickle
 
+# Paper runtime output (events, databases, checkpoints, replay results)
+/results/
+*.db
+*.sqlite
+*.sqlite3
+*.jsonl
+autonomous_raw_strategy_trades.csv
+
 # Logs
 *.log
 *.tmp

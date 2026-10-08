@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from src.research.s2_extended.validation.s2r_raw_reconstruction import (
     BASE_FEATURES,
@@ -20,6 +21,7 @@ from src.research.s2_extended.validation.s2r_raw_reconstruction import (
     run_s26,
     run_s26_state_machine,
     transform_volatility,
+    trade_key,
     walk_signal_positions,
 )
 
@@ -33,6 +35,67 @@ def _quality_train() -> pd.DataFrame:
                 row[feature] = offset + index + feature_index
             rows.append(row)
     return pd.DataFrame(rows)
+
+
+def test_validated_research_slices_shared_oos_boundary_into_both_windows() -> None:
+    """The frozen Research loop uses inclusive pandas label slices per window.
+
+    A timestamp at the prior window's validation_end and the next window's
+    validation_start is therefore evaluated under both fitted windows. Paper's
+    one-window-per-timestamp map cannot represent this source behavior yet.
+    """
+    boundary = pd.Timestamp("2024-05-06 13:30:00", tz="UTC")
+    bars = pd.DataFrame(
+        {"close": [100.0, 101.0, 102.0]},
+        index=pd.DatetimeIndex(
+            [boundary - pd.Timedelta(minutes=1), boundary, boundary + pd.Timedelta(minutes=1)]
+        ),
+    )
+    adjacent_windows = (
+        (bars.index[0], bars.index[0], boundary),
+        (boundary, boundary, bars.index[-1]),
+    )
+
+    window_slices = [bars.loc[start:end] for _, start, end in adjacent_windows]
+
+    assert all(boundary in window.index for window in window_slices)
+
+
+def test_s27_identity_excludes_window_but_includes_entry_exit_and_session() -> None:
+    first = pd.Series(
+        {
+            "entry_timestamp": "2024-05-06T13:30:00Z",
+            "exit_timestamp": "2024-05-06T13:50:00Z",
+            "session_id": "2024-05-06",
+            "window": 1,
+        }
+    )
+    same_trade_other_window = first.copy()
+    same_trade_other_window["window"] = 2
+    distinct_exit = first.copy()
+    distinct_exit["exit_timestamp"] = "2024-05-06T13:51:00Z"
+
+    assert trade_key(first) == trade_key(same_trade_other_window)
+    assert trade_key(first) != trade_key(distinct_exit)
+
+
+def test_s27_rejects_duplicate_economic_identity_across_windows() -> None:
+    from src.research.s2_extended.validation.s2r_raw_reconstruction import (
+        integrate_s27,
+    )
+
+    duplicate = {
+        "entry_timestamp": pd.Timestamp("2024-05-06T13:30:00Z"),
+        "exit_timestamp": pd.Timestamp("2024-05-06T13:50:00Z"),
+        "session_id": "2024-05-06",
+        "net_R": 0.25,
+    }
+    s2 = pd.DataFrame(
+        [dict(duplicate, window=1), dict(duplicate, window=2)]
+    )
+
+    with pytest.raises(RuntimeError, match="Duplicate S2 trade identity"):
+        integrate_s27(s2, pd.DataFrame(), pd.DataFrame())
 
 
 def test_fit_uses_state_two_lower_tail_and_fifth_percentile_scales() -> None:

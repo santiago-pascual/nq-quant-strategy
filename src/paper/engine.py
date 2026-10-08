@@ -63,13 +63,16 @@ class PaperEngineConfig:
     tick_size: float = 0.25
     price_offset: float = 0.0
     commission_per_contract: float = 0.0
+    exchange_fee_per_contract: float = 0.0
+    regulatory_fee_per_contract: float = 0.0
     automatic_simulated_fills: bool = False
 
     def __post_init__(self) -> None:
         if self.point_value <= 0 or self.initial_equity <= 0 or self.tick_size <= 0:
             raise ValueError("point_value, initial_equity, and tick_size must be positive.")
-        if self.price_offset < 0 or self.commission_per_contract < 0:
-            raise ValueError("price_offset and commission must be non-negative.")
+        if (self.price_offset < 0 or self.commission_per_contract < 0
+                or self.exchange_fee_per_contract < 0 or self.regulatory_fee_per_contract < 0):
+            raise ValueError("price offset and per-contract costs must be non-negative.")
 
 
 # ============================================================================
@@ -98,6 +101,8 @@ class PaperStepResult:
     account_equity: float = 0.0
     realized_pnl: float = 0.0
     commissions: float = 0.0
+    exchange_fees: float = 0.0
+    regulatory_fees: float = 0.0
 
 
 # ============================================================================
@@ -310,8 +315,13 @@ class PaperTradingEngine:
         self._newly_filled_strategies: set[str] = set()
         self._realized_pnl = 0.0
         self._commissions = 0.0
+        self._exchange_fees = 0.0
+        self._regulatory_fees = 0.0
         self._account_equity = self.config.initial_equity
         self._position_commissions: dict[str, float] = {}
+        self._position_exchange_fees: dict[str, float] = {}
+        self._position_regulatory_fees: dict[str, float] = {}
+        self._position_initial_risk: dict[str, float] = {}
 
     # ========================================================================
 
@@ -391,6 +401,18 @@ class PaperTradingEngine:
     @property
     def commissions(self) -> float:
         return self._commissions
+
+    @property
+    def exchange_fees(self) -> float:
+        return self._exchange_fees
+
+    @property
+    def regulatory_fees(self) -> float:
+        return self._regulatory_fees
+
+    @property
+    def total_costs(self) -> float:
+        return self._commissions + self._exchange_fees + self._regulatory_fees
 
     def enable_simulated_fills(self) -> None:
         if not isinstance(self.broker, InMemoryBrokerAdapter):
@@ -485,9 +507,21 @@ class PaperTradingEngine:
                     strategy.set_fitted_models_for_bar(models)
             return
         window = market_data.get("hmm_window")
-        if market_data.get("hmm_state") is None or window is None:
-            return
         if self.context_adapter is None:
+            return
+        # Autonomous live S2R receives its own independently scheduled
+        # two-year/three-month raw-state HMM and fitted training quantities.
+        # Research Replay continues to use the explicit window mapping above.
+        live_hash = market_data.get("s2r_model_hash")
+        live_version = market_data.get("s2r_model_version")
+        provider = getattr(self.context_adapter.context, "hmm_provider", None)
+        live_model = getattr(provider, "current_s2r_fitted_model", None)
+        if live_hash and live_version is not None and live_model is not None:
+            for strategy in self.strategies:
+                if isinstance(strategy, S2RStrategy) and strategy.model_window != int(live_version):
+                    strategy.set_fitted_model(live_model, window=int(live_version))
+            return
+        if market_data.get("hmm_state") is None or window is None:
             return
         for strategy in self.strategies:
             if isinstance(strategy, S2RStrategy) and strategy.model_window != int(window):
@@ -1240,6 +1274,8 @@ class PaperTradingEngine:
             account_equity=self._account_equity,
             realized_pnl=self._realized_pnl,
             commissions=self._commissions,
+            exchange_fees=self._exchange_fees,
+            regulatory_fees=self._regulatory_fees,
         )
 
     # ========================================================================
@@ -1315,13 +1351,22 @@ class PaperTradingEngine:
             broker_fill,
             timestamp=timestamp,
         )
-        commission = (
-            broker_fill.quantity * self.config.commission_per_contract
-        )
+        commission = broker_fill.quantity * self.config.commission_per_contract
+        exchange_fee = broker_fill.quantity * self.config.exchange_fee_per_contract
+        regulatory_fee = broker_fill.quantity * self.config.regulatory_fee_per_contract
+        total_fill_cost = commission + exchange_fee + regulatory_fee
         self._commissions += commission
-        self._account_equity -= commission
+        self._exchange_fees += exchange_fee
+        self._regulatory_fees += regulatory_fee
+        self._account_equity -= total_fill_cost
         self._position_commissions[strategy_name] = (
             self._position_commissions.get(strategy_name, 0.0) + commission
+        )
+        self._position_exchange_fees[strategy_name] = (
+            self._position_exchange_fees.get(strategy_name, 0.0) + exchange_fee
+        )
+        self._position_regulatory_fees[strategy_name] = (
+            self._position_regulatory_fees.get(strategy_name, 0.0) + regulatory_fee
         )
 
         broker_order = self.broker.get_order(broker_fill.broker_order_id)
@@ -1347,6 +1392,12 @@ class PaperTradingEngine:
                 "quantity": broker_fill.quantity,
                 "price": broker_fill.price,
                 "signal": broker_fill.signal.value,
+                "commission": commission,
+                "exchange_fee": exchange_fee,
+                "regulatory_fee": regulatory_fee,
+                "total_cost": total_fill_cost,
+                "artificial_slippage_ticks": 0,
+                "contract_symbol": (self._last_market_data or {}).get("contract_symbol"),
             },
             timestamp=timestamp,
         )
@@ -1371,6 +1422,9 @@ class PaperTradingEngine:
                         "quantity": position_after.quantity,
                         "entry_price": position_after.entry_price,
                         "side": position_after.side.value,
+                        "contract_symbol": (self._last_market_data or {}).get("contract_symbol"),
+                        "entry_features": self._serializable_market_data(self._last_market_data or {}),
+                        "point_value": self.config.point_value,
                     },
                     timestamp=timestamp,
                 )
@@ -1415,6 +1469,13 @@ class PaperTradingEngine:
 
             if entry_request is None:
                 raise RuntimeError("Missing pending portfolio entry for entry fill")
+
+            per_contract_risk = getattr(risk_result, "risk_per_contract", None)
+            if per_contract_risk is not None:
+                self._position_initial_risk[strategy_name] = (
+                    self._position_initial_risk.get(strategy_name, 0.0)
+                    + float(per_contract_risk) * broker_fill.quantity
+                )
 
             # Register exactly the quantity that was actually filled.
 
@@ -1483,17 +1544,6 @@ class PaperTradingEngine:
             if position_before is None:
                 raise RuntimeError("Exit fill closed no known execution position")
 
-            self.logger.log_position_closed(
-                {
-                    "strategy_name": strategy_name,
-                    "quantity": position_before.quantity,
-                    "entry_price": position_before.entry_price,
-                    "side": position_before.side.value,
-                    "exit_price": broker_fill.price,
-                },
-                timestamp=timestamp,
-            )
-
             # Realized PnL.
 
             if position_before.side is StrategySignal.LONG:
@@ -1510,6 +1560,33 @@ class PaperTradingEngine:
             )
             self._realized_pnl += realized_pnl
             self._account_equity += realized_pnl
+            total_position_cost = (
+                self._position_commissions[strategy_name]
+                + self._position_exchange_fees.get(strategy_name, 0.0)
+                + self._position_regulatory_fees.get(strategy_name, 0.0)
+            )
+            initial_risk_usd = self._position_initial_risk.get(strategy_name)
+            net_pnl = realized_pnl - total_position_cost
+            self.logger.log_position_closed(
+                {
+                    "strategy_name": strategy_name,
+                    "quantity": position_before.quantity,
+                    "entry_price": position_before.entry_price,
+                    "side": position_before.side.value,
+                    "exit_price": broker_fill.price,
+                    "point_value": self.config.point_value,
+                    "gross_pnl": realized_pnl,
+                    "commission": self._position_commissions[strategy_name],
+                    "exchange_fees": self._position_exchange_fees.get(strategy_name, 0.0),
+                    "regulatory_fees": self._position_regulatory_fees.get(strategy_name, 0.0),
+                    "total_costs": total_position_cost,
+                    "net_pnl": net_pnl,
+                    "initial_risk_usd": initial_risk_usd,
+                    "realized_r": net_pnl / initial_risk_usd if initial_risk_usd else None,
+                    "account_balance_after": self._account_equity,
+                },
+                timestamp=timestamp,
+            )
 
             # Risk release follows the actual quantity that was exited.
 
@@ -1517,10 +1594,13 @@ class PaperTradingEngine:
                 strategy_name,
                 fill_quantity=position_before.quantity,
                 realized_pnl=(
-                    realized_pnl - self._position_commissions[strategy_name]
+                    net_pnl
                 ),
             )
             self._position_commissions.pop(strategy_name, None)
+            self._position_exchange_fees.pop(strategy_name, None)
+            self._position_regulatory_fees.pop(strategy_name, None)
+            self._position_initial_risk.pop(strategy_name, None)
 
             # The execution position is now flat, so the portfolio slot
 

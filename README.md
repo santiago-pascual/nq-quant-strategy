@@ -1,259 +1,144 @@
-# NQ Quant Strategy
+# MNQ Quant Strategy Research and Paper Trading
 
-Quantitative research infrastructure for Nasdaq futures (NQ/MNQ), built around canonical 1-minute Databento data, modular strategy implementations, reproducible backtests, reconciliation audits, portfolio analysis, robustness testing, and execution/account simulations.
+Research and Paper execution infrastructure for four MNQ futures strategies. The repository includes frozen historical research, a deterministic Research/Paper replay, a causal HMM implementation under provisional validation, and a local Paper engine with analytics, checkpoints, shadow replay, and a protected read-only monitoring API.
 
-The repository is at a **pre-paper-trading** stage. Its historical results and account simulations are research evidence only; they are not live validation or a guarantee of future performance.
+**This project is paper-only. It does not route real-money orders.** Historical backtests and simulated Paper executions are not live results and do not predict future performance.
 
-## Overview
+## Project status at a glance
 
-The project combines four frozen strategy components into one research portfolio:
+| Area | Status | What the evidence supports |
+|---|---|---|
+| Historical Research OOS | Validated historical benchmark | Frozen 2020-06-23 through 2026-06-19 portfolio: 3,255 trades and the metrics below. |
+| Research/Paper replay | Validated | 2,899 exact Paper executions; the other 356 Research trades were classified by existing account/risk gates; no mismatches or extras. |
+| Causal HMM | Implemented; provisional | Forward filtering and causal refit paths exist. The long pseudo-live run was interrupted and not completed, so this is not production validation. |
+| Realtime Paper engine | Implemented for replay/local operation | SQLite/WAL analytics, checkpoints, shadow replay and monitoring are implemented and have focused test coverage. |
+| Live market data | Not available | No connected live MNQ feed/provider or credentials are included. Current supported input is historical replay data. |
+| CME calendar | Loader/schema and validation exist; reviewed snapshot missing | Do not run calendar-dependent operation across uncovered dates. No 2026-10-07 through 2026-12-31 MNQ snapshot is installed. |
+| Linux deployment | Example only | A systemd replay template is provided. It has not been installed or tested on Linux. |
 
-- **MRL1** — mean reversion, long
-- **S2R** — regime-filtered short strategy with adverse-excursion recovery logic
-- **MRS2** — mean reversion, short
-- **ORB** — 30-minute opening-range breakout
+## Strategies
 
-The codebase separates strategy logic from research orchestration and result generation. The validation workflow emphasizes deterministic data loading, baseline-to-modular reconciliation, a common out-of-sample (OOS) period, execution-friction stress, statistical path analysis, and chronological funded-account simulation.
+- **MRL1** — long mean reversion. Its strategy contract consumes raw HMM state 1.
+- **MRS2** — short mean reversion. Its strategy contract consumes raw HMM state 2.
+- **S2R** — short regime strategy with recovery analysis. It consumes raw HMM state 2; recovery enrichment is analytical and does not replace the baseline executable lifecycle.
+- **ORB** — New York opening-range breakout with one entry per session, stop/target handling, and session-close management.
 
-## Final System
+Research strategy parameters and the frozen Research Replay are separate from the newer causal Paper HMM path. The causal provider preserves the raw fitted component IDs; it does not apply semantic state remapping.
 
-The current frozen system is **MRL1 + S2R + MRS2 + ORB**. The four components are confirmed by the current portfolio scripts, modular strategy code, and the `v1.3-full-system-validation` milestone.
+## Historical out-of-sample benchmark
 
-### MRL1
+The frozen Research portfolio covers **2020-06-23 through 2026-06-19**. It contains **3,255 trades** and reports:
 
-| Field | Frozen definition |
-|---|---|
-| Context | HMM state 1; volatility percentile 20–40 |
-| Direction | Long |
-| Entry | Z-score at or below -2.5 |
-| Exit | 25-point target, 37.5-point stop, or 8-bar horizon |
-| Reward/risk | 25 / 37.5 = 0.6667R |
-
-### S2R
-
-| Field | Frozen definition |
-|---|---|
-| Context | HMM state 2; volatility percentile 40–60 |
-| Direction | Short |
-| Entry | Quality score at least 0.75 |
-| Exit | 25-point stop, 1.75R target, or 20-bar horizon |
-| Lifecycle | 0.70R adverse-excursion threshold, +0.20R recovery, six-bar recovery deadline |
-
-### MRS2
-
-| Field | Frozen definition |
-|---|---|
-| Context | HMM state 2; volatility percentile 80–100 |
-| Direction | Short |
-| Entry | Z-score at or above +2.0 |
-| Exit | 27.5-point target, 25-point stop, or 30-bar horizon |
-| Reward/risk | 27.5 / 25 = 1.10R |
-
-### ORB
-
-| Field | Frozen definition |
-|---|---|
-| Context | New York regular trading hours |
-| Opening range | 09:30–10:00 America/New_York |
-| Direction | Long above the range high; short below the range low |
-| Entry | Breakout touch between 10:00 and 11:00 |
-| Exit | 2R target, opposite-side stop, or RTH close |
-| Lifecycle | One trade per session; stop takes priority when stop and target occur in the same bar |
-
-The ORB modular reproduction checks the frozen standalone OOS benchmark of **1,442 trades**, **+156.026568R**, **0.1082015R expectancy**, **48.404993% win rate**, **1.255941 profit factor**, and **-14.175719R maximum drawdown**. These are ORB reconciliation values, not live results and not the four-strategy portfolio scorecard.
-
-## Portfolio Architecture
-
-The portfolio is assembled from the frozen trade streams and sorted chronologically by entry timestamp, with strategy attribution retained for every trade. The portfolio analysis performs:
-
-- full-sample stream-count checks: MRL1 **483**, S2R **537**, MRS2 **1,052**, ORB **1,747**; total **3,819**
-- common-OOS partitioning for the official window
-- duplicate checks on `(entry_timestamp, strategy)`
-- strategy-level and combined accounting in R
-- daily, monthly, and yearly breakdowns
-- daily strategy correlations, same-day interaction, entry overlap, concurrency, and contribution analysis
-
-The common OOS trade-count audits in the funded simulation are MRL1 **430**, S2R **520**, MRS2 **863**, and ORB **1,442**, for **3,255** trades. The analysis preserves chronological ordering; it does not shuffle individual trades.
-
-The repository does not contain the generated four-strategy `portfolio_metrics.csv` or common-OOS portfolio output in the checked-in tree. Consequently, this README does not reproduce unverified portfolio expectancy, profit factor, drawdown, Sharpe, Sortino, or total-R values.
-
-## Validation Methodology
-
-The validation pipeline is chronological:
-
-1. **Individual strategy validation** — freezes strategy definitions and evaluates their historical trade streams.
-2. **Modular/baseline reconciliation** — compares modular implementations against the established research baselines. Mean reversion uses the modular 08AA reproduction; ORB uses baseline and modular reconciliation scripts.
-3. **Common-OOS portfolio validation** — merges the four frozen streams, applies the exact shared OOS window, checks counts and ordering, and produces portfolio-level accounting.
-4. **Robustness analysis** — tests whether the frozen portfolio's conclusions depend on one path, one time window, one strategy, or a narrow parameter/execution assumption.
-5. **Transaction-cost and slippage stress** — applies the configured MNQ cost model and adverse deterministic/random execution assumptions to the common OOS stream.
-6. **Monte Carlo and bootstrap analysis** — evaluates trade permutation, IID trade, IID daily, moving-block daily, strategy-preserving daily, execution, and missed-trade paths.
-7. **Funded-account simulation** — replays the chronological common-OOS portfolio under Combine and XFA account policies without independently shuffling trades.
-
-These stages test reproducibility and historical robustness. They do not establish live profitability or production readiness.
-
-## Out-of-Sample Results
-
-The official common OOS window is:
-
-**2020-06-23 through 2026-06-19**, inclusive, in the New York session calendar.
-
-The committed analysis code verifies the following common-OOS counts:
-
-| Strategy | OOS trades |
+| Metric | Frozen Research OOS |
 |---|---:|
-| MRL1 | 430 |
-| S2R | 520 |
-| MRS2 | 863 |
-| ORB | 1,442 |
-| **Total** | **3,255** |
+| Total return | **+289.6619R** |
+| Expectancy | **+0.08899R/trade** |
+| Profit factor | **1.216** |
+| Win rate | **50.66%** |
+| Maximum drawdown | **−18.0935R** |
 
-The portfolio analysis script writes the exact combined metrics to `src\research\results\portfolio\portfolio_metrics.csv` when run. That generated file is not committed in the current repository snapshot, so no portfolio-level expectancy, profit factor, win rate, maximum drawdown, Sharpe, Sortino, trading-day count, or total-R claim is made here.
+Strategy counts are MRL1 430, MRS2 863, S2R 520, and ORB 1,442. These are historical Research results under the repository's bar-level execution and cost assumptions. They are not realtime Paper or live results.
 
-## Robustness Testing
+## Frozen Research/Paper Replay validation
 
-The full-system robustness engine is `src\research\portfolio\22_mr_orb_portfolio_robustness.py`. It operates on the official common OOS and implements:
+The completed full OOS Research Replay used frozen Research HMM states and reference trade artifacts. The run summary records `causal_inference_used: false`: this validates Paper execution against the frozen Research methodology; it does **not** validate causal HMM inference.
 
-| Test | Failure mode examined |
-|---|---|
-| Deterministic cost/slippage grid | Sensitivity to repeatable execution friction |
-| Random adverse slippage | Variation in fills rather than one fixed slippage path |
-| Trade-sequence permutation | Dependence of drawdown on the observed trade order |
-| IID trade bootstrap | Uncertainty under independent trade resampling |
-| IID daily bootstrap | Uncertainty while retaining daily aggregation |
-| Moving-block daily bootstrap | Dependence on clustered daily outcomes |
-| Strategy-preserving daily bootstrap | Whether strategy composition matters beyond aggregate daily returns |
-| Missed-trade stress | Degradation from execution failures or unavailable fills |
-| Worst-tail degradation | Sensitivity to additional damage in the worst historical trades |
-| Year/month/week stability | Concentration in particular calendar periods |
-| Drawdown episodes and duration | Depth and persistence of loss periods |
-| Strategy contribution/correlation | Dependence on one component or correlated components |
-| Entry overlap/concurrency | Simultaneous exposure and operational load |
+| Strategy | Frozen Research trades | Exact Paper executions | Legitimate account/risk gate | Mismatches | Paper extras |
+|---|---:|---:|---:|---:|---:|
+| MRL1 | 430 | 428 | 2 | 0 | 0 |
+| MRS2 | 863 | 806 | 57 | 0 | 0 |
+| S2R | 520 | 519 | 1 | 0 | 0 |
+| ORB | 1,442 | 1,146 | 296 | 0 | 0 |
+| **Total** | **3,255** | **2,899** | **356** | **0** | **0** |
 
-The engine is configured for **50,000** simulations, moving blocks of **5, 10, and 20 days**, random adverse slippage up to **10 ticks per side**, and missed-trade stress of **1%, 2%, 5%, and 10%**. These are test configurations, not claims about actual live execution.
+The non-executions were classified as daily-loss, maximum-daily-trades, or validated ORB per-contract risk-cap rejections. Every executed Paper trade matched the Research comparison fields; no unexplained differences or extra Paper trades remained. Shortened-session ORB closes and S2R final-20-bar entry eligibility were included in the final replay validation. The run artifacts are generated under `results/` and are intentionally not versioned.
 
-Generated scorecards and simulation tables are written under `src\research\results\portfolio_robustness\`. They are generated artifacts and are not present in the checked-in repository snapshot; numerical robustness conclusions are therefore intentionally not reproduced here.
+## Causal HMM: implementation and validation status
 
-## Transaction Costs and Slippage
+`src/models/causal_hmm.py` implements causal forward filtering and model/refit/checkpoint support. The current strategy contract uses raw fitted IDs (MRL1 state 1; MRS2 and S2R state 2), with no semantic alignment between fits. The configured cadence is expanding MR training with four-calendar-month refits and rolling two-year S2R training with three-calendar-month refits. These are distinct from the frozen historical Research Replay path.
 
-The full-system scripts model the following MNQ assumptions:
+The causal HMM was provisionally accepted for further Paper integration after focused checks. A complete 2024-08-27 through 2026-08-26 pseudo-live validation did **not** complete; the run was interrupted due to runtime constraints. Therefore, no completed pseudo-live performance or full-period restart-equivalence claim is made here. Differences from frozen Research states/trades are expected because Research used its historical decoding/training methodology.
 
-- MNQ tick size: **0.25 points**
-- MNQ tick value: **$0.50**
-- MNQ point value: **$2.00**
-- configured Topstep MNQ round-turn cost: **$1.22**
+## Paper engine and analytics
 
-The deterministic portfolio stress grid tests 0, 1, 2, 3, 4, 5, 6, 8, 10, 12, 16, and 20 ticks per side. Random execution stress samples adverse slippage independently on each side up to the configured scenario maximum. These are explicit research assumptions, not guaranteed broker, exchange, or funded-account fills.
+The Paper subsystem is designed for simulated execution only. Its current components include:
 
-## Funded Account Validation
+- sequential Paper engine, risk/conflict/execution and simulated broker/fill paths;
+- replay market-data source (no live MNQ provider is connected);
+- SQLite analytics store using WAL, event and trade diagnostics;
+- checkpoints and recovery/verification commands;
+- shadow replay and daily parity reporting;
+- CME calendar snapshot loader and fail-closed coverage validation;
+- local single-writer lock for a shared output directory;
+- bearer-token-protected, loopback-only, read-only monitoring API.
 
-`src\research\portfolio\22_full_system_funded_simulation.py` performs account-policy simulation separately from strategy validation:
+The monitoring API uses a versioned JSON envelope (`schema_version: "1.0"`) and read-only routes for health, account, strategies, positions, trades, HMM/refits, feed, checkpoint, parity, events, candidates, daily reports, and risk. It has no order-entry endpoints. Do not expose it publicly without an authenticated private access path and TLS termination. The local writer lock is not cross-host fencing; do not run simultaneous Windows and cloud instances against the same account or data stream.
 
-- exact common-OOS portfolio sequence only
-- chronological trade order preserved
-- real historical trading-day boundaries preserved
-- no individual trade shuffling
-- **50,000** replay paths
-- vectorized and scalar engines checked by a deterministic parity audit over **25** paths, capped at **250** trades for the audit
+### Market data and CME calendar
 
-### Combine model
+The current adapter supports deterministic replay, not a live feed. Live Paper remains blocked on a market-data provider, credentials, reconnect/backfill handling, and operational sequence validation.
 
-- starting balance: **$50,000**
-- profit target: **+$3,000**
-- maximum loss: **-$2,000**
-- maximum simulated path length: **500 trades**
-- risk policies include 0.25%, 0.50%, 0.75%, 1.00%, and 0.50%-to-1.00% after a $1,000 threshold
+The calendar loader accepts explicit reviewed snapshots. The official [CME trading-hours page](https://www.cmegroup.com/trading-hours.html) provides product/date selection and warns that schedules may change. No reviewed MNQ snapshot currently covers 2026-10-07 through 2026-12-31. Product-specific hours still need verification for October 12, November 11 and November 25–28, and December 24–26 and 31, 2026, before those exceptions can be marked covered. The updater/validator does not manufacture hours; uncovered sessions fail closed.
 
-### XFA model
+### Deployment
 
-- starting balance: **$50,000**
-- fixed loss floor: **$48,000**
-- minimum winning days: **5**
-- minimum winning-day profit: **$150**
-- maximum simulated path length: **2,000 trades**
-- payout intervals: 20, 21, and 22 days
-- payout amounts: $500 through $2,000 across the configured grid
+- **Windows:** local deterministic Paper replay can be launched with `scripts/start_paper_replay.ps1` after installing the pinned environment. Use a dedicated output directory and retain its checkpoints and SQLite database.
+- **Linux:** `deploy/systemd/mnq-paper-replay.service.example` is a replay-service template only. Linux installation and runtime have not been tested in this project environment. Review paths, service user, environment file, storage and resource limits before use.
+- **Cloud:** no cloud resource has been configured. Published free-tier quotas do not establish that the workload is operationally suitable. Full history bootstrap, complete S2R refit cost, Linux runtime, and multi-host fencing remain unverified.
 
-The code writes Combine and XFA result tables under `src\research\results\portfolio\funded\`. Those generated outputs are not committed in the current repository snapshot, so no pass rates, survival rates, payouts, or account-level performance figures are asserted here. This is a simulation of account constraints, not evidence of future funded-account performance.
+## Reproducibility and tests
 
-## Reproducibility
+Use Python 3.13 on the tested Windows x86-64 environment with `requirements-realtime-paper-py313.lock`. The lock pins versions but is not a platform-independent hash lock. Linux x86-64/ARM64 wheels were inspected, but installation/runtime was not tested; Windows ARM64 is also untested.
 
-The canonical market path is:
-
-- loader: `src\databento_loader.py`, via `load_databento_mnq()`
-- raw data: `data\raw\mnq\ohlcv_1m\`
-- legacy dataset: `data\Dataset_NQ_1min_2022_2025.csv`; it is not the canonical modular validation source
-
-Representative research commands from the committed scripts:
+Install in a project virtual environment:
 
 ```powershell
-python .\src\research\orb\20_orb_modular_reproduction.py
-python .\src\research\portfolio\21_mr_orb_portfolio_analysis.py
-python .\src\research\portfolio\22_mr_orb_portfolio_robustness.py
-python .\src\research\portfolio\22_full_system_funded_simulation.py
+py -3.13 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -r requirements-realtime-paper-py313.lock
 ```
 
-The scripts perform their own input and count audits and write CSV/PNG reports under `src\research\results\`. The authoritative S2R stream is `src\research\results\s2_extended\s2r_modular_authoritative_reproduction.csv`; the broader `s2r_modular_full_databento_trades.csv` export is not the frozen benchmark.
+Focused validation commands:
 
-### Current Paper Engine Research Replay
-
-`python -m src.paper.run_research_replay` runs the current Paper Engine over the inclusive UTC date range **2020-06-23 through 2026-06-19**. It verifies the frozen 08B HMM-state and strategy-trade artifact hashes before use, injects those timestamped Research states without HMM inference, and uses the strategy-specific Research volatility definitions. Mean Reversion and S2R entries fill at the signal bar close; ORB's session-close marker follows the last available ORB-RTH bar for each New York date, including shortened sessions. The existing Paper Engine lifecycle, risk, conflict, execution, and broker paths remain active. A 40-RTH-bar tail manages entries made on the final OOS date; only in-range entry signals are included in the comparison.
-
-Outputs are deterministic files under `results\paper\research_replay\`: `summary.csv`, `trades.csv`, `parity.csv`, and `run_summary.json`. The trade-level parity report identifies missing, extra, and mismatched trades, including the first differing field and strategy attribution. To limit the run to one strategy or change a setting, use `--strategy {MRL1,MRS2,S2R,ORB}`, `--start`, `--end`, `--output-dir`, `--initial-equity`, `--commission-per-contract`, or `--price-offset`. This Research Replay is separate from the causal autonomous runner; it does not run causal HMM inference.
-
-## Project Structure
-
-```text
-data\
-  raw\mnq\ohlcv_1m\       Canonical Databento MNQ 1-minute files
-src\
-  databento_loader.py     Canonical data loader
-  session_engine.py       Session and RTH infrastructure
-  strategies\
-    mean_reversion\       MRL1 and MRS2 modular strategies
-    s2r\                  S2R modular strategy and recovery logic
-    orb\                  ORB modular strategy and lifecycle
-  research\
-    mean_reversion\       Mean-reversion validation and robustness
-    orb\                  ORB baseline, reconciliation, robustness, funding
-    portfolio\            Four-strategy portfolio and account validation
-    results\              Frozen inputs and generated research outputs
-tests\                    Strategy and lifecycle tests
-trade_visualizer.py       Trade inspection against canonical market data
+```powershell
+pytest -q tests\models\test_causal_hmm.py
+pytest -q tests\paper\test_realtime_paper.py tests\paper\test_analytics_store.py
+pytest -q tests\paper\test_monitoring_api.py tests\paper\test_cme_calendar.py tests\paper\test_single_writer.py tests\paper\test_systemd_notify.py
 ```
 
-The repository also contains older S2, backup, directional, barrier, and exploratory research scripts. They remain research history and are not additional components of the frozen four-strategy system.
+On 2026-10-07, the focused causal-HMM, Paper/realtime, calendar, monitoring, risk and S2R reconstruction validation set completed with **117 passed**. This does not include a full OOS replay or completed pseudo-live run.
 
-## Validation Status
+Local replay CLI (PAPER mode only; choose timestamps inside locally available data and supply a reviewed calendar snapshot and explicit cost policy):
 
-- [x] MRL1 and MRS2 mean-reversion validation and modular reproduction
-- [x] S2R modular reproduction and recovery-lifecycle audit
-- [x] ORB baseline, execution audit, and baseline-to-modular reconciliation
-- [x] Four-strategy portfolio integration and common-OOS count audits
-- [x] Portfolio robustness test implementations
-- [x] Transaction-cost and slippage stress-test implementations
-- [x] Monte Carlo, bootstrap, block-bootstrap, tail, missed-trade, and concentration analyses implemented
-- [x] Chronological Combine/XFA funded-account simulation implementation
-- [x] Scalar/vector parity audit implementation
-- [ ] Paper-trading validation
-- [ ] Live execution validation
-- [ ] Production risk/execution infrastructure
+```powershell
+python -m src.paper.run_realtime_paper --command run --mode PAPER `
+  --replay-start "<UTC_START_IN_LOCAL_DATA>" --replay-end "<UTC_END_IN_LOCAL_DATA>" `
+  --calendar-snapshot "<REVIEWED_MNQ_CALENDAR_JSON>" `
+  --cost-config ".\src\paper\config\topstepx_mnq_fees_2026-07.json" `
+  --output-dir results/paper/local_replay
+```
 
-The latest repository milestone is `v1.3-full-system-validation`. The validation code is complete enough to support a reproducible pre-paper-trading research system, but the repository does not establish live or paper-trading performance.
+The supported CLI commands also include validation, stop/status, event inspection, checkpoint verification, shadow/daily reports, database backup, analytics and the read-only API. For argument details, run `python -m src.paper.run_realtime_paper --help`. Use only a calendar-covered interval and the appropriate explicit cost configuration. The deterministic historical Research Replay is separate and can be invoked with `python -m src.paper.run_research_replay --start 2020-06-23 --end 2026-06-19 --output-dir results/paper/research_replay`; it is long-running and is not required for the focused tests above.
 
-## Limitations and Next Stage
+## Current limitations and roadmap
 
-The results are dependent on historical Databento bars, bar-level execution assumptions, conservative intrabar ambiguity rules, modeled costs, and the selected OOS window. Generated full-system metric and account-result files are not committed in this snapshot, and the research code cannot establish fill quality, liquidity, market impact, or future regime behavior.
+### Before autonomous realtime Paper
 
-The next stage is to freeze the reproducible research inputs, verify the complete outputs in a controlled environment, build the execution and risk infrastructure, and conduct paper trading. No claim is made that the historical system will work live.
+1. Connect and validate a real MNQ market-data provider, including credentials, reconnects, backfill and duplicate/out-of-order handling.
+2. Obtain and review authoritative product-specific CME session exceptions; install and validate the covered calendar snapshot.
+3. Validate full causal history bootstrap and scheduled refit cost; complete pseudo-live/restart validation under an approved runtime budget.
+4. Test the pinned dependencies and end-to-end replay on the chosen Linux target, if using Linux.
+5. Add cross-host/account-level fencing and operational controls before moving between machines.
 
-## Disclaimer
+### Before a mobile client
 
-Historical and backtested results are not guarantees of future performance. Simulated funded-account results are not live results. Execution quality, slippage, liquidity, transaction costs, market impact, and regime changes can materially affect live outcomes.
+1. Freeze and version the monitoring API schema.
+2. Choose a private authenticated transport, TLS boundary, access policy, and retention/backup policy.
+3. Build the client against the read-only API; no mobile order-entry functionality is part of this project scope.
 
-## License
+No step above authorizes real-money order routing. This repository currently supports PAPER mode only.
 
-Copyright © 2026 Santiago Pascual. All Rights Reserved.
+## License and risk notice
 
-This repository is publicly available for viewing, educational, and research purposes only. Reproduction, redistribution, commercial use, or derivative works require prior written permission from the author.
-
-See [LICENSE](LICENSE) for the complete terms.
+See [LICENSE](LICENSE). Historical backtests and simulated fills depend on the available data, bar-level assumptions, modeled transaction costs and execution rules. Actual fills, slippage, liquidity, market impact, system failures and future regimes may differ materially. This is quantitative research and paper-trading software, not investment advice or a guarantee of future results.

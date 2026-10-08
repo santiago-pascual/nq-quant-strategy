@@ -52,6 +52,23 @@ def make_bars(n=700):
     return bars
 
 
+def make_rth_bars(n=700):
+    """Return sequential test bars on the validated New York RTH clock."""
+    start = pd.Timestamp("2026-01-05 09:30", tz="America/New_York")
+    bars = []
+    for index in range(n):
+        session, minute = divmod(index, 450)
+        timestamp = start + pd.Timedelta(days=session, minutes=minute)
+        close = (
+            100.0
+            + 0.05 * index
+            + 2.0 * np.sin(index / 17.0)
+            + 0.5 * np.sin(index / 5.0)
+        )
+        bars.append(make_bar(timestamp.to_pydatetime(), close))
+    return bars
+
+
 def make_feature_frame(n=1200):
     """
     Deterministic but non-degenerate HMM feature fixture.
@@ -130,7 +147,7 @@ def test_online_context_warms_up():
         )
     )
 
-    bars = make_bars(150)
+    bars = make_rth_bars(150)
 
     first = context.update(bars[0])
 
@@ -154,7 +171,7 @@ def test_online_context_produces_complete_context():
 
     last = None
 
-    for bar in make_bars(700):
+    for bar in make_rth_bars(700):
         last = context.update(bar)
 
     assert last is not None
@@ -173,6 +190,111 @@ def test_online_context_produces_complete_context():
         assert feature in last
         assert last[feature] is not None
         assert np.isfinite(last[feature])
+
+
+def test_vector_bootstrap_matches_sequential_context_across_gaps_and_candidates():
+    from src.paper.market_context import S2R_FEATURES
+    from src.strategies.mean_reversion.config import MRL1_CONFIG, MRS2_CONFIG
+    from src.strategies.mean_reversion.strategy import MeanReversionStrategy
+
+    stamps = []
+    for day, count in (
+        ("2024-08-23", 70),
+        ("2024-08-26", 70),
+        ("2025-01-06", 70),
+    ):
+        base = pd.Timestamp(f"{day} 09:30", tz="America/New_York")
+        stamps.extend(base + pd.Timedelta(minutes=i) for i in range(count))
+        # Include an explicit RTH-to-ETH observation and a session/weekend gap.
+        stamps.append(pd.Timestamp(f"{day} 17:00", tz="America/New_York"))
+    x = np.arange(len(stamps), dtype=float)
+    close = 15000 + np.cumsum(0.2 * np.sin(x / 5.0) + 0.07 * np.cos(x / 13.0))
+    raw = pd.DataFrame({
+        "timestamp": pd.DatetimeIndex(stamps).tz_convert("UTC"),
+        "open": close - 0.1,
+        "high": close + 0.4,
+        "low": close - 0.5,
+        "close": close,
+        "volume": 100 + (x.astype(int) % 17),
+    })
+    config = MarketContextConfig(hmm_min_train_valid=15, hmm_n_iter=2)
+
+    sequential = CausalMarketContext(config)
+    expected = [sequential.update(row) for row in raw.to_dict(orient="records")]
+
+    split = len(raw) - 12
+    bootstrapped = CausalMarketContext(config)
+    boundary = bootstrapped.bootstrap_causal_history(raw.iloc[:split])
+    assert (
+        bootstrapped._raw_hmm_provider.mr._history.capacity
+        == bootstrapped._raw_hmm_provider.mr._history.size
+    )
+    assert (
+        bootstrapped._raw_hmm_provider.s2r._history.capacity
+        == bootstrapped._raw_hmm_provider.s2r._history.size
+    )
+    actual = [bootstrapped.update(row) for row in raw.iloc[split:].to_dict(orient="records")]
+
+    assert boundary == raw["timestamp"].iloc[split - 1]
+    assert bootstrapped._raw_hmm_provider.mr.fit_count == sequential._raw_hmm_provider.mr.fit_count == 2
+    assert bootstrapped._raw_hmm_provider.s2r.fit_count == sequential._raw_hmm_provider.s2r.fit_count
+    assert bootstrapped._raw_hmm_provider.mr.refit_events[1]["fit_timestamp"] == sequential._raw_hmm_provider.mr.refit_events[1]["fit_timestamp"]
+    assert bootstrapped._raw_hmm_provider.mr.refit_events[1]["training_start"] == sequential._raw_hmm_provider.mr.refit_events[1]["training_start"]
+    assert bootstrapped._raw_hmm_provider.mr.refit_events[1]["training_valid_rows"] == sequential._raw_hmm_provider.mr.refit_events[1]["training_valid_rows"]
+    for left_history, right_history in (
+        (bootstrapped._raw_hmm_provider.mr.history, sequential._raw_hmm_provider.mr.history),
+        (bootstrapped._raw_hmm_provider.s2r.history, sequential._raw_hmm_provider.s2r.history),
+    ):
+        assert len(left_history) == len(right_history)
+        for left_row, right_row in zip(left_history, right_history):
+            assert left_row["timestamp"] == right_row["timestamp"]
+            for key in left_row.keys() - {"timestamp", "eligible"}:
+                if pd.isna(left_row[key]) or pd.isna(right_row[key]):
+                    assert pd.isna(left_row[key]) and pd.isna(right_row[key]), (
+                        left_row["timestamp"], key, left_row[key], right_row[key]
+                    )
+                else:
+                    assert np.isclose(left_row[key], right_row[key], rtol=0, atol=1e-15)
+    left_model = bootstrapped._raw_hmm_provider.mr.model
+    right_model = sequential._raw_hmm_provider.mr.model
+    assert left_model is not None and right_model is not None
+    for left, right in (
+        (left_model.scaler.mean_, right_model.scaler.mean_),
+        (left_model.scaler.scale_, right_model.scaler.scale_),
+        (left_model.model.startprob_, right_model.model.startprob_),
+        (left_model.model.transmat_, right_model.model.transmat_),
+        (left_model.model.means_, right_model.model.means_),
+        (left_model.model.covars_, right_model.model.covars_),
+    ):
+        assert np.allclose(left, right, rtol=0, atol=2e-12)
+    assert bootstrapped._volatility_observations == sequential._volatility_observations
+
+    keys = (
+        *HMM_FEATURES, *S2R_FEATURES, "zscore", "vol_percentile", "hmm_state",
+        "hmm_posterior", "s2r_hmm_state", "s2r_hmm_posterior",
+    )
+    expected_tail = expected[split:]
+    for want, got in zip(expected_tail, actual):
+        for key in keys:
+            left, right = want.get(key), got.get(key)
+            if left is None or right is None:
+                assert left is right, (key, want["timestamp"])
+            elif isinstance(left, (tuple, list, np.ndarray)):
+                assert np.allclose(left, right, rtol=0, atol=1e-12), (key, want["timestamp"])
+            elif isinstance(left, (int, np.integer, str)):
+                assert left == right, (key, want["timestamp"])
+            else:
+                assert np.isclose(left, right, rtol=0, atol=1e-12), (key, want["timestamp"])
+
+    strategies = (MeanReversionStrategy(MRL1_CONFIG), MeanReversionStrategy(MRS2_CONFIG))
+    def candidates(rows):
+        return [
+            (str(row["timestamp"]), index, strategy.generate_signal(row).value)
+            for index, row in enumerate(rows)
+            for strategy in strategies
+            if strategy.generate_signal(row).value != "flat"
+        ]
+    assert candidates(expected_tail) == candidates(actual)
 
 
 def test_research_window_uses_strict_pre_oos_training():

@@ -1,0 +1,13 @@
+{
+  "profile_id": "topstepx-mnq-2026-07-28-v1",
+  "platform": "TopstepX",
+  "applicable_accounts": ["Trading Combine", "Express Funded Account", "Live Funded Account"],
+  "symbol": "MNQ",
+  "currency": "USD",
+  "commission_per_contract_side": 0.25,
+  "exchange_fee_per_contract_side": 0.35,
+  "regulatory_fee_per_contract_side": 0.01,
+  "artificial_slippage_ticks": 0.0,
+  "source_url": "https://help.topstep.com/en/articles/8284213-topstepx-commissions-and-fees",
+  "verified_date": "2026-07-28"
+}

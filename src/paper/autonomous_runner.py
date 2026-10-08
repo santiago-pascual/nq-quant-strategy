@@ -48,20 +48,30 @@ import time
 import pandas as pd
 
 from src.databento_loader import load_databento_mnq
-from src.models.windowed_regime import (
-    ResearchHMMWindow,
-    load_frozen_research_hmm_windows,
-)
 from src.paper.context_adapter import PaperMarketContextAdapter
+from src.paper.market_context import (
+    PRECOMPUTED_CONTEXT_FEATURES,
+    build_causal_context_features,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 RESULTS_DIR = PROJECT_ROOT / "results" / "paper" / "autonomous"
-FROZEN_HMM_SCHEDULE = (
-    Path(__file__).resolve().parent
-    / "config"
-    / "research_07_hmm_window_schedule.csv"
-)
+
+
+def is_standard_rth_close_bar(
+    timestamp: Any,
+    *,
+    rth_start_minute: int = 9 * 60 + 30,
+    rth_end_minute: int = 16 * 60,
+) -> bool:
+    """Return whether this minute bar ends at the configured standard close."""
+    stamp = pd.Timestamp(timestamp)
+    if stamp.tzinfo is None:
+        raise ValueError("RTH close checks require timezone-aware timestamps.")
+    local = stamp.tz_convert("America/New_York")
+    minute = local.hour * 60 + local.minute
+    return rth_start_minute <= minute < rth_end_minute and minute == rth_end_minute - 1
 
 
 @dataclass(frozen=True)
@@ -80,6 +90,10 @@ class AutonomousRunConfig:
     # Progress reporting.
     progress_every_bars: int = 100_000
 
+    # Optional equivalent history fast-forward for bounded pseudo-live runs.
+    # The default runner behavior remains one-bar-at-a-time warmup.
+    bootstrap_causal_history: bool = False
+
     # Raw-data validation.
     require_sorted_data: bool = True
     require_unique_timestamps: bool = True
@@ -94,6 +108,8 @@ class AutonomousRunStats:
 
     context_ready_bars: int = 0
     elapsed_seconds: float = 0.0
+    feature_construction_seconds: float = 0.0
+    bootstrap_seconds: float = 0.0
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -111,6 +127,8 @@ class AutonomousRunStats:
             ),
             "context_ready_bars": self.context_ready_bars,
             "elapsed_seconds": self.elapsed_seconds,
+            "feature_construction_seconds": self.feature_construction_seconds,
+            "bootstrap_seconds": self.bootstrap_seconds,
         }
 
 
@@ -238,7 +256,7 @@ def identify_final_rth_bars(
     rth_start_minute: int = 9 * 60 + 30,
     rth_end_minute: int = 16 * 60,
 ) -> frozenset[pd.Timestamp]:
-    """Return the last available RTH bar timestamp for each New York session."""
+    """Identify standard 16:00 ET closes from each bar's own timestamp."""
     if timestamp_column not in dataframe:
         raise KeyError(f"Missing session timestamp column: {timestamp_column}")
     timestamps = pd.to_datetime(
@@ -246,14 +264,15 @@ def identify_final_rth_bars(
         utc=True,
         errors="raise",
     )
-    local = timestamps.dt.tz_convert("America/New_York")
-    minute_of_day = local.dt.hour * 60 + local.dt.minute
-    rth = (minute_of_day >= rth_start_minute) & (minute_of_day < rth_end_minute)
-    if not bool(rth.any()):
-        return frozenset()
-    session_dates = local.dt.date
-    final_by_session = timestamps[rth].groupby(session_dates[rth]).max()
-    return frozenset(pd.Timestamp(value) for value in final_by_session.tolist())
+    return frozenset(
+        stamp
+        for stamp in timestamps
+        if is_standard_rth_close_bar(
+            stamp,
+            rth_start_minute=rth_start_minute,
+            rth_end_minute=rth_end_minute,
+        )
+    )
 
 
 class AutonomousPaperRunner:
@@ -310,21 +329,7 @@ class AutonomousPaperRunner:
         if full_df.empty:
             raise ValueError("Canonical MNQ dataset is empty.")
 
-        final_rth_bars = identify_final_rth_bars(full_df)
-        if not final_rth_bars:
-            raise ValueError("Canonical MNQ dataset contains no regular-hours bars.")
-        windows = load_frozen_research_hmm_windows(FROZEN_HMM_SCHEDULE)
         context = self.context_adapter.context
-        if not context.bars_seen:
-            self.context_adapter.configure_research_windows(windows)
-        elif context.windowed_hmm is None:
-            raise RuntimeError(
-                "Cannot attach research windows after context replay has started."
-            )
-        elif context.windowed_hmm.windows != windows:
-            raise RuntimeError(
-                "Active HMM windows differ from the frozen Research 07 schedule."
-            )
 
         start = (
             _normalise_timestamp(self.config.start_timestamp)
@@ -336,6 +341,14 @@ class AutonomousPaperRunner:
             if self.config.end_timestamp is not None
             else None
         )
+        if end is not None:
+            full_df = full_df.loc[full_df["timestamp"] <= end].reset_index(drop=True)
+        local_times = pd.to_datetime(full_df["timestamp"], utc=True).dt.tz_convert(
+            "America/New_York"
+        )
+        minute_of_day = local_times.dt.hour * 60 + local_times.dt.minute
+        if not ((minute_of_day >= 9 * 60 + 30) & (minute_of_day < 16 * 60)).any():
+            raise ValueError("Canonical MNQ dataset contains no regular-hours bars.")
         range_mask = pd.Series(True, index=full_df.index)
         if start is not None:
             range_mask &= full_df["timestamp"] >= start
@@ -352,28 +365,86 @@ class AutonomousPaperRunner:
                 "Primed market context must end strictly before replay starts."
             )
 
+        bootstrap_index = 0
+        feature_construction_seconds = 0.0
+        bootstrap_seconds = 0.0
+        precomputed_feature_frame: pd.DataFrame | None = None
+        if (
+            self.config.bootstrap_causal_history
+            and start is not None
+            and primed_through is None
+        ):
+            feature_started = time.perf_counter()
+            precomputed_feature_frame = build_causal_context_features(full_df)
+            feature_construction_seconds = time.perf_counter() - feature_started
+            directional_ready = (
+                precomputed_feature_frame["log_return"].rolling(30).count() == 30
+            )
+            precomputed_feature_frame.loc[
+                ~directional_ready, "close_location_30"
+            ] = float("nan")
+            bootstrap_rows = full_df.loc[full_df["timestamp"] < selected_start]
+            if bootstrap_rows.empty:
+                raise ValueError(
+                    "Causal history bootstrap requires at least one bar before the replay start."
+                )
+            bootstrap_started = time.perf_counter()
+            primed_through = context.bootstrap_causal_history(
+                bootstrap_rows,
+                precomputed_features=precomputed_feature_frame.iloc[:len(bootstrap_rows)],
+            )
+            bootstrap_seconds = time.perf_counter() - bootstrap_started
+            if primed_through >= selected_start:
+                raise RuntimeError("Causal bootstrap crossed the strategy start boundary.")
+            bootstrap_index = int(
+                full_df["timestamp"].searchsorted(selected_start, side="left")
+            )
+
         self.stats = AutonomousRunStats(
             total_bars=len(df),
             first_timestamp=df["timestamp"].iloc[0],
             last_timestamp=df["timestamp"].iloc[-1],
+            feature_construction_seconds=feature_construction_seconds,
+            bootstrap_seconds=bootstrap_seconds,
         )
 
         started = time.perf_counter()
         self.daily_equity = []
 
-        for index, row in full_df.iterrows():
-            if end is not None and row["timestamp"] > end:
+        feature_rows = (
+            precomputed_feature_frame.loc[:, PRECOMPUTED_CONTEXT_FEATURES]
+            .iloc[bootstrap_index:]
+            .itertuples(index=False, name=None)
+            if precomputed_feature_frame is not None
+            else None
+        )
+        for index, timestamp, open_, high, low, close, volume in full_df.iloc[
+            bootstrap_index:
+        ].itertuples(index=True, name=None):
+            if end is not None and timestamp > end:
                 break
-            market_data = _row_to_market_data(row)
-            market_data["is_final_rth_bar"] = (
-                pd.Timestamp(row["timestamp"]) in final_rth_bars
+            market_data = {
+                "timestamp": timestamp,
+                "open": float(open_),
+                "high": float(high),
+                "low": float(low),
+                "close": float(close),
+                "volume": float(volume),
+            }
+            market_data["is_final_rth_bar"] = is_standard_rth_close_bar(
+                timestamp
             )
 
-            if row["timestamp"] < selected_start:
-                if primed_through is not None and row["timestamp"] <= primed_through:
+            if timestamp < selected_start:
+                if primed_through is not None and timestamp <= primed_through:
                     continue
                 self.context_adapter.update(market_data)
                 continue
+
+            if feature_rows is not None:
+                self.context_adapter.set_next_precomputed_features(
+                    dict(zip(PRECOMPUTED_CONTEXT_FEATURES, next(feature_rows)))
+                )
 
             # ---------------------------------------------------------
             # PAPER ENGINE
@@ -392,7 +463,7 @@ class AutonomousPaperRunner:
                 market_data,
                 context_index=index,
             )
-            local_day = row["timestamp"].tz_convert("America/New_York").date()
+            local_day = timestamp.tz_convert("America/New_York").date()
             if (
                 not self.daily_equity
                 or self.daily_equity[-1]["date"] != local_day.isoformat()

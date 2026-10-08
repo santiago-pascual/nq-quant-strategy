@@ -109,7 +109,9 @@ class S2RStrategy(BaseStrategy):
                 if "s2r_hmm_states" in market_data:
                     hmm_state = dict(market_data["s2r_hmm_states"]).get(window)
                 else:
-                    hmm_state = market_data.get("hmm_state")
+                    hmm_state = market_data.get(
+                        "s2r_hmm_state", market_data.get("hmm_state")
+                    )
                 self._window_evaluations.append(
                     {
                         "window": window,
@@ -154,7 +156,9 @@ class S2RStrategy(BaseStrategy):
             hmm_state = dict(market_data["s2r_hmm_states"]).get(window)
         else:
             # Keep direct strategy use and existing callers provider-agnostic.
-            hmm_state = market_data.get("hmm_state")
+            hmm_state = market_data.get(
+                "s2r_hmm_state", market_data.get("hmm_state")
+            )
         if not isinstance(hmm_state, int):
             return {"window": window, "hmm_state": hmm_state, "qualifies": False,
                     "reason": "missing_target_state", "quality": None,

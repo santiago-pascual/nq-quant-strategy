@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
-
 import numpy as np
 import pandas as pd
 import pytest
@@ -11,13 +9,13 @@ from src.paper.market_context import CausalMarketContext, MarketContextConfig
 
 
 def test_incremental_features_match_batch_features_at_current_bar():
-    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    start = pd.Timestamp("2026-01-05 09:30", tz="America/New_York")
     bars = []
     for index in range(140):
         close = 100.0 + index * 0.02 + np.sin(index / 4.0)
         bars.append(
             {
-                "timestamp": start + timedelta(minutes=index),
+                "timestamp": (start + pd.Timedelta(minutes=index)).to_pydatetime(),
                 "open": close,
                 "high": close + 0.5,
                 "low": close - 0.5,

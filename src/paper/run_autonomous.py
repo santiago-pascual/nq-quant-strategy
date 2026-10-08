@@ -14,15 +14,13 @@ from src.execution import ExecutionEngine
 from src.paper.autonomous_runner import (
     AutonomousPaperRunner,
     AutonomousRunConfig,
-    FROZEN_HMM_SCHEDULE,
     RESULTS_DIR,
     load_canonical_raw_mnq,
 )
 from src.paper.context_adapter import PaperMarketContextAdapter
+from src.paper.candidate_ledger import build_candidate_ledger
 from src.paper.engine import PaperEngineConfig, PaperTradingEngine
 from src.paper.logger import PaperEventLogger
-from src.paper.market_context import build_causal_context_features
-from src.models.windowed_regime import load_frozen_research_hmm_windows
 from src.portfolio.conflict import PortfolioConflictEngine
 from src.risk import RiskEngine
 from src.risk.policy import XFA_50K_PRODUCTION_POLICY
@@ -37,7 +35,10 @@ def build_real_paper_engine(
     *,
     initial_equity: float = 50_000.0,
     commission_per_contract: float = 0.0,
+    exchange_fee_per_contract: float = 0.0,
+    regulatory_fee_per_contract: float = 0.0,
     price_offset: float = 0.0,
+    recover_trailing_event: bool = False,
 ) -> tuple[PaperTradingEngine, PaperMarketContextAdapter]:
     context_adapter = PaperMarketContextAdapter()
     strategies = (
@@ -53,7 +54,10 @@ def build_real_paper_engine(
         risk=RiskEngine(XFA_50K_PRODUCTION_POLICY.to_risk_limits()),
         conflict=PortfolioConflictEngine(max_concurrent_positions=3),
         broker=broker,
-        logger=PaperEventLogger(output_dir / "events.jsonl"),
+        logger=PaperEventLogger(
+            output_dir / "events.jsonl",
+            recover_trailing_partial=recover_trailing_event,
+        ),
         context_adapter=context_adapter,
         config=PaperEngineConfig(
             initial_equity=initial_equity,
@@ -61,6 +65,8 @@ def build_real_paper_engine(
             tick_size=0.25,
             price_offset=price_offset,
             commission_per_contract=commission_per_contract,
+            exchange_fee_per_contract=exchange_fee_per_contract,
+            regulatory_fee_per_contract=regulatory_fee_per_contract,
             automatic_simulated_fills=True,
         ),
     )
@@ -219,6 +225,8 @@ def write_run_artifacts(
     daily_equity = pd.DataFrame(runner.daily_equity)
     daily_equity.to_csv(output_dir / "daily_equity.csv", index=False)
     pd.DataFrame(trades).to_csv(output_dir / "trade_ledger.csv", index=False)
+    candidate_ledger = build_candidate_ledger(_event_records(event_path))
+    candidate_ledger.to_csv(output_dir / "candidate_ledger.csv", index=False)
     pd.DataFrame(fills).to_csv(output_dir / "fills.csv", index=False)
     execution_costs = [
         {
@@ -277,11 +285,18 @@ def write_run_artifacts(
     summary = {
         **runner.stats.as_dict(),
         "strategies": [strategy.name for strategy in engine.strategies],
-        "hmm_fitted_windows": list(context.windowed_hmm.fitted_windows),
+        "hmm_mode": "causal_online",
+        "hmm_fitted": bool(context._hmm is not None),
         "s2r_fitted_windows": fitted_s2_windows,
         "orders": len(orders),
         "fills": len(fills),
         "closed_trades": len(trades),
+        "candidate_outcome_counts": {
+            str(outcome): int(count)
+            for outcome, count in candidate_ledger["terminal_outcome"]
+            .value_counts()
+            .items()
+        },
         "open_positions": len(engine.execution.get_positions()),
         "gross_realized_pnl": engine.realized_pnl,
         "commissions": engine.commissions,
@@ -292,7 +307,6 @@ def write_run_artifacts(
             row["modeled_price_offset_cost"] for row in execution_costs
         ),
         "commission_per_contract": engine.config.commission_per_contract,
-        "configured_window_schedule": str(FROZEN_HMM_SCHEDULE),
     }
     (output_dir / "run_summary.json").write_text(
         json.dumps(summary, indent=2, default=str),
@@ -318,13 +332,11 @@ def _smoke_replay(
     start = local_start.tz_convert("UTC")
     end = local_end.tz_convert("UTC")
 
-    schedule = load_frozen_research_hmm_windows(FROZEN_HMM_SCHEDULE)
-    context_adapter.configure_research_windows(schedule)
     history = raw.loc[raw["timestamp"] < start]
     if history.empty:
         raise ValueError("Smoke session has no prior canonical warmup history.")
-    features = build_causal_context_features(history)
-    context_adapter.context.prime_history(features)
+    for _, row in history.iterrows():
+        context_adapter.update(row.to_dict())
 
     session = raw.loc[
         (raw["timestamp"] >= start) & (raw["timestamp"] <= end)
@@ -342,15 +354,10 @@ def _smoke_replay(
         ),
     )
     runner.run(session)
-    if context_adapter.context.bars_seen <= len(features):
+    if context_adapter.context.bars_seen <= len(history):
         raise RuntimeError("Smoke replay did not advance the real market context.")
-    if not context_adapter.context.windowed_hmm.fitted_windows:
-        raise RuntimeError("Smoke replay did not initialize a real window HMM.")
-    if not any(
-        isinstance(strategy, S2RStrategy) and strategy.fitted_model is not None
-        for strategy in engine.strategies
-    ):
-        raise RuntimeError("Smoke replay did not initialize the real S2R model.")
+    if context_adapter.context._hmm is None:
+        raise RuntimeError("Smoke replay did not initialize the causal online HMM.")
     if engine.execution.get_positions():
         raise RuntimeError("Smoke replay ended with open positions.")
     return runner

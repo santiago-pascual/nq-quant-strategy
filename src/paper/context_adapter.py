@@ -37,6 +37,15 @@ class PaperMarketContextAdapter:
         context: CausalMarketContext | None = None,
     ) -> None:
         self.context = context or CausalMarketContext()
+        self._next_precomputed_features: Mapping[str, Any] | None = None
+
+    def set_next_precomputed_features(
+        self, features: Mapping[str, Any]
+    ) -> None:
+        """Supply a timestamp-matched causal feature row for the next bar."""
+        if self._next_precomputed_features is not None:
+            raise RuntimeError("A precomputed context feature row is already queued.")
+        self._next_precomputed_features = features
 
     def update(
         self,
@@ -58,7 +67,13 @@ class PaperMarketContextAdapter:
             "close": float(market_data["close"]),
             "volume": float(market_data["volume"]),
         }
-        enriched = self.context.update(row)
+        features = self._next_precomputed_features
+        self._next_precomputed_features = None
+        enriched = (
+            self.context.update_with_precomputed_features(row, features)
+            if features is not None
+            else self.context.update(row)
+        )
 
         result = dict(market_data)
 

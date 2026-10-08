@@ -77,7 +77,114 @@ def test_fractional_quantity_below_one_is_rejected():
         rel=1e-9,
     )
     assert result.total_risk == pytest.approx(0.0)
+    assert result.theoretical_quantity == pytest.approx(0.75)
+    assert result.executable_quantity == 0
+    assert result.adaptive_quantity is None
     assert "stop distance" in result.reason
+
+
+def test_explicit_single_contract_budget_still_respects_aggregate_limit():
+    engine = make_risk_engine(max_total_risk=250.0)
+    request = make_request(
+        entry_price=100.0,
+        stop_price=0.0 + 1.0,
+        strategy_name="ORB",
+    )
+
+    result = engine.evaluate(
+        request,
+        trading_day=TRADING_DAY,
+        risk_per_trade_budget=198.0,
+    )
+
+    assert result.approved
+    assert result.quantity == 1
+    assert result.risk_per_contract == pytest.approx(198.0)
+    assert result.total_risk == pytest.approx(198.0)
+
+
+def test_explicit_single_contract_budget_does_not_bypass_aggregate_limit():
+    engine = make_risk_engine(max_total_risk=150.0)
+    request = make_request(
+        entry_price=100.0,
+        stop_price=1.0,
+        strategy_name="ORB",
+    )
+
+    result = engine.evaluate(
+        request,
+        trading_day=TRADING_DAY,
+        risk_per_trade_budget=198.0,
+    )
+
+    assert result.decision is RiskDecision.REJECTED
+    assert result.reason == "maximum aggregate open risk would be exceeded"
+
+
+def test_adaptive_quantity_preserves_strict_sizing_and_aggregate_limits():
+    engine = make_risk_engine(max_total_risk=250.0)
+    request = make_request(
+        entry_price=100.0,
+        stop_price=1.0,
+        strategy_name="ORB",
+    )
+
+    result = engine.evaluate(
+        request,
+        trading_day=TRADING_DAY,
+        adaptive_quantity=1,
+        adaptive_risk_limit=300.0,
+    )
+
+    assert result.approved
+    assert result.quantity == 1
+    assert result.theoretical_quantity == pytest.approx(125.0 / 198.0)
+    assert result.executable_quantity == 0
+    assert result.adaptive_quantity == 1
+    assert result.total_risk == pytest.approx(198.0)
+
+    restricted = make_risk_engine(max_total_risk=150.0).evaluate(
+        request,
+        trading_day=TRADING_DAY,
+        adaptive_quantity=1,
+        adaptive_risk_limit=300.0,
+    )
+    assert restricted.decision is RiskDecision.REJECTED
+    assert restricted.reason == "maximum aggregate open risk would be exceeded"
+    assert restricted.executable_quantity == 0
+    assert restricted.adaptive_quantity == 1
+
+
+def test_adaptive_quantity_is_rejected_above_its_explicit_risk_limit():
+    engine = make_risk_engine()
+    request = make_request(
+        entry_price=200.0,
+        stop_price=49.0,
+        strategy_name="ORB",
+    )
+
+    result = engine.evaluate(
+        request,
+        trading_day=TRADING_DAY,
+        adaptive_quantity=1,
+        adaptive_risk_limit=300.0,
+    )
+
+    assert result.decision is RiskDecision.REJECTED
+    assert result.reason == "adaptive risk limit would be exceeded"
+    assert result.executable_quantity == 0
+
+
+def test_explicit_risk_budget_must_be_positive():
+    engine = make_risk_engine()
+    request = make_request(entry_price=100.0, stop_price=50.0)
+
+    with pytest.raises(ValueError, match="risk_per_trade_budget must be positive"):
+        engine.evaluate(
+            request,
+            trading_day=TRADING_DAY,
+            risk_per_trade_budget=0.0,
+        )
 
 
 def test_fractional_quantity_1_55_is_floored_to_one():
@@ -150,6 +257,7 @@ def test_fractional_quantity_2_99_is_floored_to_two():
         (2.00, 2),
         (2.01, 2),
         (2.99, 2),
+        (2.999999, 2),
         (3.00, 3),
     ],
 )
@@ -170,8 +278,8 @@ def test_contract_sizing_always_floors(
     stop_distance = risk_per_contract / 2.0
 
     request = make_request(
-        entry_price=100.0,
-        stop_price=100.0 - stop_distance,
+        entry_price=1_000.0,
+        stop_price=1_000.0 - stop_distance,
     )
 
     result = engine.evaluate(

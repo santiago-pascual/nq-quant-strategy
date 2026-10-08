@@ -1,0 +1,38 @@
+# Disabled example for deterministic PAPER replay only.
+# There is no production/live market-data adapter in this checkout.
+[Unit]
+Description=MNQ deterministic Paper replay (simulated fills only)
+After=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=notify
+NotifyAccess=main
+WatchdogSec=60s
+TimeoutStartSec=2h
+User=mnqpaper
+Group=mnqpaper
+WorkingDirectory=/opt/mnq-paper/app
+EnvironmentFile=/etc/mnq-paper/paper.env
+Environment=PAPER_OUTPUT_DIR=/var/lib/mnq-paper
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONNOUSERSITE=1
+StateDirectory=mnq-paper
+StateDirectoryMode=0700
+ExecStart=/bin/sh /opt/mnq-paper/app/scripts/run_paper_replay.sh
+Restart=on-failure
+RestartSec=30
+TimeoutStopSec=120
+KillSignal=SIGTERM
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/mnq-paper
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
