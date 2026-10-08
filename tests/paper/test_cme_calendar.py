@@ -87,14 +87,14 @@ def test_expected_globex_missing_minutes_respect_halt_and_maintenance(calendar):
     assert missing == [pd.Timestamp("2024-03-08T20:15:00Z"), pd.Timestamp("2024-03-08T20:16:00Z")]
 
 
-def test_month_end_equity_index_halt_applies_only_on_last_open_session():
+def test_equity_index_month_end_window_is_open_after_cme_pause_elimination():
     calendar = CMETradingCalendar(CMECalendarSnapshot(
         version="fixture-month-end", source=CME_HOLIDAY_SOURCE,
         coverage_start=date(2024, 2, 1), coverage_end=date(2024, 2, 29),
     ))
     assert calendar.expected_globex_minute(pd.Timestamp("2024-02-28T21:20:00Z"))
     assert calendar.expected_globex_minute(pd.Timestamp("2024-02-29T21:14:00Z"))
-    assert not calendar.expected_globex_minute(pd.Timestamp("2024-02-29T21:15:00Z"))
+    assert calendar.expected_globex_minute(pd.Timestamp("2024-02-29T21:15:00Z"))
     assert calendar.expected_globex_minute(pd.Timestamp("2024-02-29T21:30:00Z"))
 
 
@@ -123,6 +123,25 @@ def test_dst_boundary_uses_new_york_timezone_rules():
     assert after.rth_start.isoformat() == "2026-11-02T09:30:00-05:00"
 
 
+def test_installed_october_snapshot_covers_only_reviewed_dates_and_oct12_is_regular():
+    from pathlib import Path
+
+    snapshot_path = (
+        Path(__file__).resolve().parents[2] / "src" / "paper" / "config"
+        / "cme_mnq_calendar_2026-10-08_2026-10-31.json"
+    )
+    calendar = CMETradingCalendar(CMECalendarSnapshot.from_json(snapshot_path))
+    assert calendar.snapshot.coverage_start == date(2026, 10, 8)
+    assert calendar.snapshot.coverage_end == date(2026, 10, 31)
+    oct12 = calendar.snapshot.session_for_rth_date(date(2026, 10, 12))
+    assert oct12.session_type == "regular"
+    assert oct12.globex_close.isoformat() == "2026-10-12T17:00:00-04:00"
+    assert calendar.trading_date_for_timestamp(pd.Timestamp("2026-10-25T22:00:00Z")) == date(2026, 10, 26)
+    assert calendar.snapshot.session_for_rth_date(date(2026, 10, 31)).session_type == "weekend"
+    with pytest.raises(CalendarUnavailable, match="does not cover 2026-11-01"):
+        calendar.snapshot.session_for_rth_date(date(2026, 11, 1))
+
+
 def test_thanksgiving_and_christmas_overrides_are_read_from_snapshot_schema():
     # Schema-semantics fixture only; these values are NOT an official 2026 CME review.
     calendar = CMETradingCalendar(CMECalendarSnapshot(
@@ -147,18 +166,61 @@ def test_cme_review_validator_checks_product_coverage_and_identity(tmp_path):
 
     snapshot = CMECalendarSnapshot(
         version="fixture-reviewed", source=CME_HOLIDAY_SOURCE,
-        coverage_start=date(2026, 10, 7), coverage_end=date(2026, 12, 31),
+        coverage_start=date(2026, 10, 8), coverage_end=date(2026, 10, 31),
     )
     snapshot_path = tmp_path / "snapshot.json"
     review_path = tmp_path / "review.json"
     snapshot_path.write_text(json.dumps(snapshot.to_mapping()), encoding="utf-8")
     review_path.write_text(json.dumps({
         "source_url": CME_HOLIDAY_SOURCE, "product": "MNQ",
-        "timezone": "America/New_York", "coverage_start": "2026-10-07",
-        "coverage_end": "2026-12-31", "reviewed_at_utc": "2026-10-07T00:00:00Z",
+        "product_name": "MNQ Micro E-mini Nasdaq-100 Index Futures",
+        "timezone": "America/New_York", "venue": "CME Globex", "product_view": "Futures",
+        "source_timezone": "America/Chicago", "selection_method": "CME Full Calendar date/product selection",
+        "coverage_start": "2026-10-08", "coverage_end": "2026-10-31",
+        "reviewed_at_utc": "2026-10-08T10:11:43Z",
+        "verified_schedule": {"october_12_2026": "regular"},
         "snapshot_identity": snapshot.identity,
     }), encoding="utf-8")
     assert validate(snapshot_path, review_path)["valid"] is True
     with pytest.raises(ValueError, match="identity"):
         review_path.write_text(json.dumps({"snapshot_identity": "wrong"}), encoding="utf-8")
         validate(snapshot_path, review_path)
+
+
+def test_cme_review_validator_rejects_exceptions_outside_coverage(tmp_path):
+    import json
+    from src.paper.cme_calendar import CMECalendarSnapshot, CME_HOLIDAY_SOURCE
+    from scripts.validate_cme_snapshot import validate
+
+    snapshot = CMECalendarSnapshot(
+        version="fixture-reviewed", source=CME_HOLIDAY_SOURCE,
+        coverage_start=date(2026, 10, 8), coverage_end=date(2026, 10, 31),
+        exceptions={"2028-01-01": {"session_type": "closed"}},
+    )
+    snapshot_path = tmp_path / "snapshot.json"
+    review_path = tmp_path / "review.json"
+    snapshot_path.write_text(json.dumps(snapshot.to_mapping()), encoding="utf-8")
+    review_path.write_text(json.dumps({
+        "source_url": CME_HOLIDAY_SOURCE, "product": "MNQ",
+        "product_name": "MNQ Micro E-mini Nasdaq-100 Index Futures",
+        "timezone": "America/New_York", "venue": "CME Globex", "product_view": "Futures",
+        "source_timezone": "America/Chicago", "selection_method": "CME Full Calendar date/product selection",
+        "coverage_start": "2026-10-08", "coverage_end": "2026-10-31",
+        "reviewed_at_utc": "2026-10-08T10:11:43Z",
+        "verified_schedule": {"october_12_2026": "regular"},
+        "snapshot_identity": snapshot.identity,
+    }), encoding="utf-8")
+    with pytest.raises(ValueError, match="outside declared coverage"):
+        validate(snapshot_path, review_path)
+
+
+def test_future_calendar_review_template_cannot_be_loaded_as_runtime_snapshot():
+    from pathlib import Path
+
+    template = (
+        Path(__file__).resolve().parents[2]
+        / "src" / "paper" / "config"
+        / "cme_mnq_calendar_2026-10-07_2027-12-31_REVIEW_TEMPLATE.json"
+    )
+    with pytest.raises(KeyError, match="coverage_start"):
+        CMECalendarSnapshot.from_json(template)

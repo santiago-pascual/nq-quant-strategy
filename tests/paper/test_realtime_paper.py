@@ -171,6 +171,18 @@ def test_realtime_service_marks_cme_early_close_bar_for_orb_exit(tmp_path):
     assert received[0]["calendar_version"] == "fixture-cme-calendar"
 
 
+def test_non_replay_source_requires_reviewed_calendar_even_with_session_marker(tmp_path):
+    class ExternalSource(ReplayMarketDataSource):
+        name = "external_feed"
+
+    engine, adapter = build_real_paper_engine(tmp_path)
+    with pytest.raises(ValueError, match="require a reviewed CME calendar"):
+        RealtimePaperService(
+            source=ExternalSource([]), engine=engine, context_adapter=adapter,
+            config=RealtimePaperConfig(mode="PAPER", output_dir=tmp_path),
+        )
+
+
 def test_replay_source_normalizes_only_matching_vendor_root_symbol():
     row = {
         "symbol": "MNQ.v.0", "timestamp": _bar(0).timestamp,

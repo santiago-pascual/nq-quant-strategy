@@ -1,0 +1,147 @@
+{
+  "template_status": "PARTIALLY_REVIEWED_NOT_FOR_RUNTIME",
+  "runtime_compatible": false,
+  "target_runtime_schema": "src.paper.cme_calendar.CMECalendarSnapshot",
+  "requested_calendar": {
+    "product": "MNQ",
+    "venue": "CME Globex",
+    "timezone": "America/New_York",
+    "coverage_start": "2026-10-07",
+    "coverage_end": "2027-12-31",
+    "reviewed_at_utc": null,
+    "active_snapshot_installed": true,
+    "active_snapshot_coverage_start": "2026-10-08",
+    "active_snapshot_coverage_end": "2026-10-31"
+  },
+  "official_sources_reviewed": [
+    {
+      "url": "https://www.cmegroup.com/trading-hours.html",
+      "scope": "Globex holiday period index and selector instructions",
+      "source_checked_at_utc": "2026-10-08T09:46:52Z",
+      "verified_facts": [
+        "CME instructs users to select a date and filter by product to see trading hours.",
+        "CME lists the 2026 Thanksgiving Globex holiday period as November 26-28, 2026.",
+        "CME lists the 2026 Christmas Globex holiday period as December 24-26, 2026.",
+        "CME lists the 2026 New Year's Globex holiday period as December 31, 2026-January 1, 2027.",
+        "The retrievable page content does not expose the product-filtered MNQ session-hour rows or the remaining 2027 holiday schedule."
+      ],
+      "limitations": "Date ranges are confirmed as schedule-index periods only; they do not establish MNQ open, close, early-close, reopen, RTH, ETH, or intraday halt times."
+    },
+    {
+      "url": "https://www.cmegroup.com/trading/equity-index/files/cme-micro-e-mini-futures-fact-card.pdf",
+      "scope": "MNQ regular Globex trading-hours baseline",
+      "source_checked_at_utc": "2026-10-08T09:46:52Z",
+      "verified_facts": [
+        "Micro E-mini contracts including MNQ list CME Globex hours as 5:00 p.m. to 4:00 p.m. Central Time, Sunday-Friday."
+      ],
+      "limitations": "This general fact card does not specify holiday exceptions or a product-filtered schedule for any date in the requested range."
+    },
+    {
+      "url": "https://www.cmegroup.com/trading-hours.html",
+      "scope": "Product-filtered CME Globex Futures schedule for MNQ, October 8-31, 2026",
+      "source_checked_at_utc": "2026-10-08T10:12:41Z",
+      "verified_facts": [
+        "The MNQ product row was reviewed using the Full Calendar view, Futures product view, and MNQ search; overlapping date views covered October 8-31.",
+        "Normal MNQ Globex rows show a 16:00 CT close, 16:45 CT pre-open, and 17:00 CT next trade-date open.",
+        "The October 12, 2026 MNQ trade date follows regular Globex hours; no holiday closure or early close is shown.",
+        "October 31 is Saturday and has no MNQ session in the selected date view."
+      ],
+      "limitations": "This confirms only October 8-31, 2026. No later 2026 holiday dates or 2027 sessions are covered by the installed snapshot."
+    },
+    {
+      "url": "https://www.cmegroup.com/notices/electronic-trading/2021/06/20210621.html",
+      "scope": "CME Equity Index Globex intraday pause change",
+      "source_checked_at_utc": "2026-10-08T10:12:41Z",
+      "verified_facts": [
+        "CME eliminated the 15-minute 15:15-15:30 CT pause from June 27, 2021; the affected equity-index futures trade Sunday-Friday 17:00-16:00 CT with 16:00-17:00 CT maintenance."
+      ],
+      "limitations": "The notice excludes specified 250-multiplier S&P 500 products and BTIC/TACO; MNQ is not among those listed exceptions."
+    }
+  ],
+  "snapshot_fields_template": {
+    "version": "TODO_AFTER_HUMAN_REVIEW",
+    "source": "https://www.cmegroup.com/trading-hours.html",
+    "coverage_start": "2026-10-07",
+    "coverage_end": "2027-12-31",
+    "exceptions": {
+      "2026-11-11": {
+        "review_status": "NEEDS_PRODUCT_FILTERED_MNQ_LOOKUP",
+        "official_context": "Veterans Day appears in CME's 2026 holiday/settlement notices; exact MNQ session not established.",
+        "session_type": null,
+        "rth_start": null,
+        "rth_end": null,
+        "globex_open": null,
+        "globex_close": null,
+        "closed_intervals": null,
+        "evidence_url": null
+      },
+      "2026-11-25_to_2026-11-28": {
+        "review_status": "NEEDS_PRODUCT_FILTERED_MNQ_LOOKUP_FOR_EACH_TRADE_DATE",
+        "official_context": "CME lists the Thanksgiving Globex holiday period as November 26-28; adjacent trade-date treatment must be checked in the date/product selector.",
+        "session_type": null,
+        "rth_start": null,
+        "rth_end": null,
+        "globex_open": null,
+        "globex_close": null,
+        "closed_intervals": null,
+        "evidence_url": null
+      },
+      "2026-12-24_to_2026-12-26": {
+        "review_status": "NEEDS_PRODUCT_FILTERED_MNQ_LOOKUP_FOR_EACH_TRADE_DATE",
+        "official_context": "CME lists the Christmas Globex holiday period as December 24-26.",
+        "session_type": null,
+        "rth_start": null,
+        "rth_end": null,
+        "globex_open": null,
+        "globex_close": null,
+        "closed_intervals": null,
+        "evidence_url": null
+      },
+      "2026-12-31_to_2027-01-01": {
+        "review_status": "NEEDS_PRODUCT_FILTERED_MNQ_LOOKUP_FOR_EACH_TRADE_DATE",
+        "official_context": "CME lists the New Year's Globex holiday period as December 31-January 1.",
+        "session_type": null,
+        "rth_start": null,
+        "rth_end": null,
+        "globex_open": null,
+        "globex_close": null,
+        "closed_intervals": null,
+        "evidence_url": null
+      },
+      "2027-all-holiday-exceptions": {
+        "review_status": "OFFICIAL_2027_PRODUCT_SCHEDULE_NOT_RETRIEVED",
+        "official_context": null,
+        "session_type": null,
+        "rth_start": null,
+        "rth_end": null,
+        "globex_open": null,
+        "globex_close": null,
+        "closed_intervals": null,
+        "evidence_url": null
+      }
+    },
+    "rth_start": "09:30:00",
+    "rth_end": "16:00:00",
+    "globex_open": "18:00:00",
+    "globex_close": "17:00:00",
+    "maintenance_start": "17:00:00",
+    "maintenance_end": "18:00:00"
+  },
+  "review_record_template": {
+    "source_url": "https://www.cmegroup.com/trading-hours.html",
+    "product": "MNQ",
+    "timezone": "America/New_York",
+    "coverage_start": "2026-10-07",
+    "coverage_end": "2027-12-31",
+    "reviewed_at_utc": null,
+    "snapshot_identity": null,
+    "review_status": "INCOMPLETE"
+  },
+  "activation_requirements": [
+    "The October 8-31, 2026 interval has been reviewed and installed as a separate narrow runtime snapshot. Look up every remaining date in the official CME trading-hours selector with the MNQ product filter before expanding coverage.",
+    "Record exact trade-date session type, Globex open/close, product-specific pauses, and holiday reopen for every affected date.",
+    "Confirm the strategy RTH boundaries separately from the wider Globex schedule.",
+    "Obtain official 2027 date periods and product-specific hours; do not derive them from prior years.",
+    "Replace this worksheet with a pure CMECalendarSnapshot JSON plus a completed UTC review record; do not pass this template to the runtime."
+  ]
+}

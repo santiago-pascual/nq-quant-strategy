@@ -1,0 +1,40 @@
+{
+  "review_status": "REVIEWED_PRODUCT_FILTERED_CME_GLOBEX",
+  "source_url": "https://www.cmegroup.com/trading-hours.html",
+  "product": "MNQ",
+  "product_name": "MNQ Micro E-mini Nasdaq-100 Index Futures",
+  "product_view": "Futures",
+  "venue": "CME Globex",
+  "source_timezone": "America/Chicago",
+  "timezone": "America/New_York",
+  "coverage_start": "2026-10-08",
+  "coverage_end": "2026-10-31",
+  "reviewed_at_utc": "2026-10-08T10:12:41Z",
+  "snapshot_identity": "52c086bf05d5f15edd9e1772c5cea030059a9ce71d0e019499bba72c5eebdf15",
+  "selection_method": "CME Trading Hours Full Calendar page; Product view Futures; search MNQ; date picker selections 2026-10-08, 2026-10-12, 2026-10-15, 2026-10-18, 2026-10-21, 2026-10-24, 2026-10-27, and 2026-10-30. Each result view exposes three adjacent calendar dates; overlapping views cover the full interval.",
+  "verified_schedule": {
+    "regular_trade_date_close_ct": "16:00",
+    "next_trade_date_preopen_ct": "16:45",
+    "next_trade_date_open_ct": "17:00",
+    "regular_trade_date_close_et": "17:00",
+    "next_trade_date_preopen_et": "17:45",
+    "next_trade_date_open_et": "18:00",
+    "rth_strategy_window_et": "09:30-16:00",
+    "october_12_2026": "MNQ Globex follows the regular session: trade date October 12 closes 16:00 CT; next trade date opens 17:00 CT. No holiday exception is entered.",
+    "october_31_2026": "Saturday; no MNQ session was shown in the selected Saturday column. Weekend closure follows the existing calendar semantics.",
+    "october_30_month_end": "Product row shows the regular 16:00 CT close. CME's 2021 equity-index notice says the former 15:15-15:30 CT pause was eliminated for the affected CME Equity Index futures and options, with 16:00-17:00 CT maintenance; MNQ is a Micro E-mini Equity Index future, not the stated 250-multiplier exception."
+  },
+  "additional_official_evidence": [
+    {
+      "url": "https://www.cmegroup.com/notices/electronic-trading/2021/06/20210621.html",
+      "scope": "CME Globex Equity Index futures/options pause elimination",
+      "verified_fact": "Effective June 27, 2021, the 15-minute 15:15-15:30 CT pause was eliminated for the affected CME Equity Index futures and options; they trade Sunday-Friday 17:00-16:00 CT with 16:00-17:00 CT maintenance. The notice excludes S&P 500 250-multiplier contracts and BTIC/TACO products."
+    },
+    {
+      "url": "https://www.cmegroup.com/trading/equity-index/files/cme-micro-e-mini-futures-fact-card.pdf",
+      "scope": "MNQ regular Globex product hours",
+      "verified_fact": "Micro E-mini contracts including MNQ list Globex trading 17:00-16:00 CT Sunday-Friday."
+    }
+  ],
+  "coverage_limitations": "This snapshot covers only October 8 through October 31, 2026. No dates before October 8, after October 31, or any 2027 sessions are certified by this review. Holiday schedules outside this interval remain unverified and must stay uncovered."
+}

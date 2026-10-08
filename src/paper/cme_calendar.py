@@ -152,14 +152,6 @@ class CMECalendarSnapshot:
             _local(session_date, self.globex_close), self.source, self.version,
         )
 
-    def is_last_open_trading_date_of_month(self, session_date: date) -> bool:
-        cursor = session_date + timedelta(days=1)
-        while cursor.month == session_date.month:
-            if self.session_for_rth_date(cursor).rth_start is not None:
-                return False
-            cursor += timedelta(days=1)
-        return True
-
     def _closed(self, session_date: date, kind: str) -> CMETradingSession:
         return CMETradingSession(
             session_date, kind, None, None, None, None, self.source, self.version,
@@ -222,11 +214,6 @@ class CMETradingCalendar:
             end_minute = time.fromisoformat(end_value).hour * 60 + time.fromisoformat(end_value).minute
             if start_minute <= minute < end_minute:
                 return None
-        # CME equity-index month-end procedure pauses 15:15--15:30 CT
-        # (16:15--16:30 ET) on the final open trade date of each month.
-        if (self.snapshot.is_last_open_trading_date_of_month(day)
-                and 16 * 60 + 15 <= minute < 16 * 60 + 30):
-            return None
         return day
 
     def expected_globex_minute(self, timestamp: datetime | pd.Timestamp) -> bool:

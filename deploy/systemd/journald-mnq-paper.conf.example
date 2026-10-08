@@ -1,0 +1,6 @@
+# Install as /etc/systemd/journald.conf.d/60-mnq-paper.conf only after
+# reviewing the effect on this host's system-wide journal retention.
+[Journal]
+SystemMaxUse=200M
+SystemKeepFree=1G
+MaxRetentionSec=14day

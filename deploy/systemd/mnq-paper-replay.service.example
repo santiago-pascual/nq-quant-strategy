@@ -23,7 +23,9 @@ StateDirectoryMode=0700
 ExecStart=/bin/sh /opt/mnq-paper/app/scripts/run_paper_replay.sh
 Restart=on-failure
 RestartSec=30
-TimeoutStopSec=120
+# The slowest scheduled MR refit is about 590s on the development machine.
+# Allow the fit to finish and the service to checkpoint before systemd kills it.
+TimeoutStopSec=900
 KillSignal=SIGTERM
 UMask=0077
 NoNewPrivileges=true

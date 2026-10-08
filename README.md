@@ -13,7 +13,7 @@ Research and Paper execution infrastructure for four MNQ futures strategies. The
 | Causal HMM | Implemented; provisional | Forward filtering and causal refit paths exist. The long pseudo-live run was interrupted and not completed, so this is not production validation. |
 | Realtime Paper engine | Implemented for replay/local operation | SQLite/WAL analytics, checkpoints, shadow replay and monitoring are implemented and have focused test coverage. |
 | Live market data | Not available | No connected live MNQ feed/provider or credentials are included. Current supported input is historical replay data. |
-| CME calendar | Loader/schema and validation exist; reviewed snapshot missing | Do not run calendar-dependent operation across uncovered dates. No 2026-10-07 through 2026-12-31 MNQ snapshot is installed. |
+| CME calendar | Narrow reviewed snapshot installed | MNQ Globex is verified for 2026-10-08 through 2026-10-31 only. All dates outside that window remain uncovered and fail closed. |
 | Linux deployment | Example only | A systemd replay template is provided. It has not been installed or tested on Linux. |
 
 ## Strategies
@@ -78,7 +78,7 @@ The monitoring API uses a versioned JSON envelope (`schema_version: "1.0"`) and 
 
 The current adapter supports deterministic replay, not a live feed. Live Paper remains blocked on a market-data provider, credentials, reconnect/backfill handling, and operational sequence validation.
 
-The calendar loader accepts explicit reviewed snapshots. The official [CME trading-hours page](https://www.cmegroup.com/trading-hours.html) provides product/date selection and warns that schedules may change. No reviewed MNQ snapshot currently covers 2026-10-07 through 2026-12-31. Product-specific hours still need verification for October 12, November 11 and November 25–28, and December 24–26 and 31, 2026, before those exceptions can be marked covered. The updater/validator does not manufacture hours; uncovered sessions fail closed.
+The calendar loader accepts explicit reviewed snapshots. A product-filtered official CME Full Calendar view (`Futures`, search `MNQ`) was reviewed for 2026-10-08 through 2026-10-31. The installed snapshot is `src/paper/config/cme_mnq_calendar_2026-10-08_2026-10-31.json`; its review record is the adjacent `.review.json`. The review confirms the normal MNQ Globex close/open sequence and that October 12 is not an MNQ holiday closure. The old 15-minute equity-index pause was eliminated by CME in 2021; the regular 16:00-17:00 CT maintenance break remains. No dates outside this short interval, including 2027, are certified. The validator requires this exact reviewed interval and uncovered dates fail closed. The larger unverified worksheet remains a non-runtime template.
 
 ### Deployment
 

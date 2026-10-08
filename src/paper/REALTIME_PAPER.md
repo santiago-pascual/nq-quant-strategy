@@ -278,38 +278,95 @@ distributed account-level fencing exists, keep only one Paper process
 connected to a given provider/account. SQLite WAL, checkpoints and lock files
 must reside on durable local storage, not a network filesystem.
 
-## CME 2026 review state
+## CME calendar review state: October 8--31, 2026
 
-No reviewed snapshot is installed for 2026-10-07 through 2026-12-31. CME's
-official schedule page exposes the holiday date ranges but directs users to
-select the relevant date and product for trading hours and warns that schedules
-can change. The currently readable static content does not provide the
-product-filtered MNQ hour rows. Therefore the following exact MNQ date records
-still need product-specific manual verification before a snapshot can cover
-them: Columbus Day Oct 12; Veterans Day Nov 11; Thanksgiving trade dates Nov
-25-28; Christmas trade dates Dec 24-26; and New Year's Eve Dec 31. Verify each
-open, close, early close, reopen, and any intraday halt/maintenance exception.
-No rule or date is inferred here. With no installed snapshot, the service's
-calendar continues to fail closed.
+A narrow product-specific CME Globex snapshot is installed at
+`src/paper/config/cme_mnq_calendar_2026-10-08_2026-10-31.json`. The adjacent
+`.review.json` records the official source, product selection, source/local
+timezones, review timestamp, and snapshot identity. Review used CME's [Trading
+Hours Full Calendar](https://www.cmegroup.com/trading-hours.html), with the
+view set to Futures and search set to MNQ. The selected product row was “MNQ
+Micro E-mini Nasdaq-100 Index Futures”; overlapping date views cover October
+8--31. The normal MNQ Globex sequence shown is 16:00 CT close, 16:45 CT
+pre-open, and 17:00 CT next trade-date open. October 12 was checked directly
+and follows that regular MNQ schedule; it is not marked as a holiday closure.
+The October 30 row shows the normal close. CME's [2021 notice](https://www.cmegroup.com/notices/electronic-trading/2021/06/20210621.html)
+eliminated the former 15-minute equity-index pause; the regular 16:00--17:00
+CT maintenance break remains. The strategy RTH window remains 09:30--16:00
+New York time.
 
-After a human reviews the exact schedule, validate snapshot plus review
-metadata with:
+The calendar validator accepts exactly October 8--31, 2026 for this reviewed
+snapshot. Dates before or after this interval, including all of 2027, remain
+uncovered and raise `CalendarUnavailable`; they must not be treated as regular
+sessions. The broader
+`src/paper/config/cme_mnq_calendar_2026-10-07_2027-12-31_REVIEW_TEMPLATE.json`
+is still an unverified, non-runtime worksheet. Holiday exceptions outside
+the reviewed interval are not inferred.
+
+Validate the installed snapshot and review record with:
 
 ```powershell
-python scripts/validate_cme_snapshot.py --snapshot <snapshot.json> `
-  --review-record <review-record.json>
+python scripts/validate_cme_snapshot.py `
+  --snapshot src/paper/config/cme_mnq_calendar_2026-10-08_2026-10-31.json `
+  --review-record src/paper/config/cme_mnq_calendar_2026-10-08_2026-10-31.review.json
 ```
 
-The review record binds the CME source URL, MNQ product, `America/New_York`,
-coverage, UTC review time, and parsed snapshot identity. The command checks
-schema and provenance metadata; it does not independently verify the truth of
-the entered market hours. Fixture tests for Thanksgiving/Christmas exercise
-schema behavior only, not CME 2026 session semantics.
+## Windows local replay startup and recovery
+
+This checkout can run the deterministic PAPER replay locally on Windows;
+there is no live market-data adapter yet. Start it from the repository root:
+
+```powershell
+$paperOutputDir = Join-Path (Get-Location) 'results/paper/local_replay'
+.\scripts\start_paper_replay.ps1 `
+  -Start 2019-06-03 -End 2019-06-05 -OutputDir $paperOutputDir
+```
+
+For Task Scheduler recovery, use the same arguments with
+`-AutoResume`. The launcher resumes only if a valid checkpoint exists; if
+state files exist without one, it fails closed. Configure Task Scheduler to
+allow only one running instance and use a bounded retry policy. Request a
+graceful stop with Ctrl+C or the runner's stop command rather than terminating
+the process. Check status with:
+
+```powershell
+python -m src.paper.run_realtime_paper --command status --output-dir $paperOutputDir
+Get-Process python | Select-Object Id,CPU,WorkingSet64
+```
+
+Do not run the same account/provider from Windows and a cloud host at once.
+The writer lock is local to one output directory and is not cross-host
+fencing. Configure durable local storage and back up the SQLite database with
+the runner's `backup-database` command alongside the checkpoint and append-only
+event/refit ledgers.
+
+## Bounded Windows resource smoke (2026-10-08)
+
+The deterministic two-day smoke used the existing full raw-data loader and
+causal bootstrap, then processed 2,714 replay bars. It completed with no
+runtime errors in 215 seconds and peaked at about 804 MB working set. The
+sampled per-bar processing median was 41 ms (maximum 135 ms); peak SQLite WAL
+was 4.2 MB, the closed database was 25.4 MB, the event ledger was 10.9 MB,
+and the checkpoint was 3.57 MB. Restoring the checkpoint took about 33 seconds
+and processed no duplicate bars. Online SQLite backup took 3.4 seconds and
+produced a 25.5 MB backup. A separate 13-bar CPU sample averaged 21.5% of one
+logical Windows CPU and peaked at about 56%; its startup/loader-inclusive wall
+time was 55 seconds. These are measurements on this Windows machine, not ARM64
+estimates. Previously measured MR/S2R refits took about 590/244 seconds on
+this machine; ARM refit duration and peak memory have not been measured.
+
+The current Windows installed package versions do not exactly match
+`requirements-realtime-paper-py313.lock`, and the lock has no artifact hashes.
+Use the lock for a clean deployment only after validating installation on the
+target platform; do not treat the current workstation environment as a
+reproducible install.
 
 ## Free-host assessment
 
-OCI publishes 3,000 OCPU-hours and 18,000 GB-hours per month for A1 compute,
-which is quota-wise enough for a 2-OCPU/12-GB instance for a 31-day month.
+OCI's Always Free resource page lists 1,500 OCPU-hours and 9,000 GB-hours
+per month for A1, described as equivalent to 2 OCPUs and 12 GB for an
+Always Free tenancy. These are home-region quota limits, not an availability
+or workload guarantee.
 Google's free Compute Engine allowance includes one e2-micro VM's monthly
 hours in selected US regions, 30 GB-month standard persistent disk, and 1 GB
 outbound transfer. These are published quotas, not availability or workload
@@ -321,7 +378,7 @@ established as suitable for this Python/HMM runtime.
 ## CME session calendar
 
 `src/paper/cme_calendar.py` represents CME Globex trade dates, regular
-maintenance/halt windows, the frozen strategy RTH (09:30--16:00 New York),
+maintenance windows, the frozen strategy RTH (09:30--16:00 New York),
 holiday closures, shortened sessions, and special-session overrides. All
 boundaries use `America/New_York`, so daylight-saving transitions are handled
 by the timezone database. CME trade dates assign Sunday evening to Monday and
@@ -332,20 +389,19 @@ with source URL and explicit coverage. An `early_close` entry must provide both
 the RTH end and Globex close. A `special` entry must provide its full RTH and
 Globex boundaries. Dates outside the declared coverage raise
 `CalendarUnavailable`; the service reports a critical event and refuses to
-evaluate strategies for that bar. It never guesses a holiday close. No official
-holiday snapshot is bundled yet, so live use remains blocked until one is
-reviewed and installed. CME publishes the [Globex holiday and trading-hour
+evaluate strategies for that bar. It never guesses a holiday close. The
+installed reviewed snapshot covers only October 8--31, 2026; any other date
+remains unavailable until reviewed coverage is installed. CME publishes the [Globex holiday and trading-hour
 schedule](https://www.cmegroup.com/trading-hours.html) and [Micro E-mini futures
 contract hours](https://www.cmegroup.com/trading/equity-index/files/cme-micro-e-mini-futures-fact-card.pdf).
 CME notes that holiday hours may change and are usually finalized about two
 weeks before the holiday; refresh the snapshot from the current official
 schedule before its coverage expires.
 
-The regular equity-index Globex maintenance period is 17:00--18:00 ET. CME's
-month-end settlement procedure also pauses equity-index futures 16:15--16:30 ET
-on the month's final open trading date; the calendar applies that pause only
-when the complete snapshot covers the rest of that month. See CME's [month-end
-settlement procedure](https://www.cmegroup.com/trading/equity-index/fairvaluefaq.html).
+The regular equity-index Globex maintenance period is 17:00--18:00 ET. CME
+eliminated the former 15-minute equity-index pause in June 2021; the calendar
+does not infer a month-end intraday closure. The October snapshot cannot be
+used for the August 2026 sample replay above.
 
 The deterministic historical replay continues to mark the actual final
 available RTH bar from that replay dataset. Realtime Paper can instead receive

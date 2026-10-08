@@ -74,6 +74,10 @@ class RealtimePaperService:
         self.calendar = calendar
         self.cost_policy = cost_policy
         if getattr(source, "name", "") != "deterministic_replay":
+            if calendar is None:
+                raise ValueError(
+                    "non-replay Paper sources require a reviewed CME calendar snapshot"
+                )
             if cost_policy is None:
                 raise ValueError("non-replay Paper sources require an explicit fee profile")
             if (cost_policy.symbol != config.symbol or cost_policy.artificial_slippage_ticks != 0
