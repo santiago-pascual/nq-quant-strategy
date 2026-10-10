@@ -601,7 +601,7 @@ def build_runner(
     )
 
 
-def load_canonical_raw_mnq() -> pd.DataFrame:
+def load_canonical_raw_mnq(*, include_contract_metadata: bool = False) -> pd.DataFrame:
     """
     Load raw Databento MNQ bars with a validated UTC ``timestamp`` column.
     """
@@ -610,8 +610,14 @@ def load_canonical_raw_mnq() -> pd.DataFrame:
     print("LOADING CANONICAL RAW MNQ DATA")
     print("=" * 80)
 
-    dataframe = load_databento_mnq()
-    dataframe = _canonicalize_raw_mnq(dataframe)
+    dataframe = (
+        load_databento_mnq(include_instrument_id=True)
+        if include_contract_metadata
+        else load_databento_mnq()
+    )
+    dataframe = _canonicalize_raw_mnq(
+        dataframe, validate_contract_mapping=include_contract_metadata
+    )
 
     print(f"Raw bars loaded: {len(dataframe):,}")
 
@@ -624,7 +630,9 @@ def load_canonical_raw_mnq() -> pd.DataFrame:
     return dataframe
 
 
-def _canonicalize_raw_mnq(dataframe: pd.DataFrame) -> pd.DataFrame:
+def _canonicalize_raw_mnq(
+    dataframe: pd.DataFrame, *, validate_contract_mapping: bool = False
+) -> pd.DataFrame:
     """Normalize the Databento loader's ET timestamp into a UTC column."""
     if not isinstance(dataframe, pd.DataFrame):
         raise TypeError("Databento MNQ loader must return a pandas DataFrame.")
@@ -673,6 +681,22 @@ def _canonicalize_raw_mnq(dataframe: pd.DataFrame) -> pd.DataFrame:
         raise ValueError(
             f"Databento MNQ data contains {duplicates} duplicate timestamps."
         )
+    if validate_contract_mapping and "instrument_id" in frame.columns:
+        instrument_ids = pd.to_numeric(frame["instrument_id"], errors="raise")
+        if instrument_ids.isna().any() or (instrument_ids <= 0).any():
+            raise ValueError("Databento MNQ data contains invalid contract instrument IDs.")
+        frame["instrument_id"] = instrument_ids.astype("int64")
+    if validate_contract_mapping:
+        if "symbol" not in frame:
+            raise ValueError("Databento MNQ data is missing its continuous contract symbol.")
+        symbols = frame["symbol"].astype(str)
+        unexpected = sorted(set(symbols) - {"MNQ.v.0"})
+        if unexpected:
+            raise ValueError(
+                "Databento MNQ data contains symbols outside the configured "
+                f"continuous contract MNQ.v.0: {unexpected[:10]}"
+            )
+        frame["symbol"] = symbols
     if len(frame) != len(dataframe):
         raise RuntimeError("Canonicalizing Databento timestamps changed row count.")
     return frame

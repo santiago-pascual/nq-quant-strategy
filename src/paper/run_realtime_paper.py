@@ -9,17 +9,29 @@ from pathlib import Path
 import signal
 import sys
 
+import numpy as np
 import pandas as pd
 
 from src.paper.autonomous_runner import load_canonical_raw_mnq
 from src.paper.context_adapter import PaperMarketContextAdapter
-from src.paper.market_context import build_causal_context_features
+from src.paper.bootstrap_artifacts import (
+    BootstrapProgressWriter,
+    load_or_build_causal_feature_cache,
+)
 from src.paper.realtime_market_data import ReplayMarketDataSource, mark_replay_session_final_bars
 from src.paper.realtime_service import RealtimePaperConfig, RealtimePaperService
 from src.paper.cme_calendar import CMECalendarSnapshot, CMETradingCalendar
 from src.paper.costs import PaperCostPolicy
 from src.paper.analytics import PaperAnalyticsReader
 from src.paper.run_autonomous import build_real_paper_engine
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+FROZEN_DATA_END_EXCLUSIVE = pd.Timestamp("2026-08-27T00:00:00Z")
+FROZEN_OOS_OUTPUT_DIRS = {
+    (PROJECT_ROOT / "results/paper/full_research_replay_final_v3").resolve(),
+    (PROJECT_ROOT / "results/paper/research_replay").resolve(),
+}
 
 
 def _run_with_graceful_signals(service: RealtimePaperService, *, restore: bool) -> None:
@@ -51,13 +63,115 @@ def _utc(value: str | None) -> pd.Timestamp | None:
     return stamp.tz_convert("UTC")
 
 
+def _validate_oos_output_dir(path: Path) -> Path:
+    resolved = path.resolve()
+    paper_root = (PROJECT_ROOT / "results/paper").resolve()
+    try:
+        relative = resolved.relative_to(paper_root)
+    except ValueError as exc:
+        raise ValueError("OOS output must be a separate directory under results/paper/oos_*.") from exc
+    if not relative.parts or not relative.parts[0].startswith("oos_"):
+        raise ValueError("OOS output directory must be under results/paper/oos_*.")
+    if resolved in FROZEN_OOS_OUTPUT_DIRS:
+        raise ValueError("OOS output cannot target a frozen Research/Paper benchmark directory.")
+    return resolved
+
+
+def _validate_oos_interval(start: pd.Timestamp, replay_end_exclusive: pd.Timestamp,
+                           data_end_exclusive: pd.Timestamp) -> None:
+    if start < FROZEN_DATA_END_EXCLUSIVE:
+        raise ValueError("OOS replay must start at or after 2026-08-27T00:00:00Z.")
+    if replay_end_exclusive <= start or data_end_exclusive < replay_end_exclusive:
+        raise ValueError("OOS replay requires start < replay-end-exclusive <= data-end-exclusive.")
+
+
+def _validate_oos_manifest(output_dir: Path, scope: dict[str, str], *, resume: bool) -> None:
+    manifest_path = output_dir / "oos_run_scope.json"
+    state_paths = (
+        manifest_path,
+        output_dir / "events.jsonl",
+        output_dir / "paper_checkpoint.json",
+        output_dir / "paper_analytics.sqlite3",
+        output_dir / "status.json",
+    )
+    has_state = any(path.exists() for path in state_paths)
+    if resume:
+        if not manifest_path.is_file():
+            raise ValueError("OOS resume requires its oos_run_scope.json manifest.")
+        saved = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if saved != scope:
+            raise ValueError("OOS resume dates/data boundary differ from the saved run scope.")
+        return
+    if has_state:
+        raise ValueError("OOS output directory already contains run state; choose a new oos_* directory or resume it.")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(json.dumps(scope, indent=2) + "\n", encoding="utf-8")
+
+
+def _validate_oos_market_data(raw: pd.DataFrame, *, start: pd.Timestamp,
+                              end_exclusive: pd.Timestamp,
+                              data_end_exclusive: pd.Timestamp) -> None:
+    if "timestamp" not in raw:
+        raise ValueError("OOS market data has no canonical UTC timestamp column.")
+    timestamps = pd.to_datetime(raw["timestamp"], utc=True, errors="raise")
+    if timestamps.isna().any() or timestamps.duplicated().any():
+        raise ValueError("OOS market data contains null or duplicate timestamps.")
+    if not timestamps.is_monotonic_increasing:
+        raise ValueError("OOS market data timestamps must be chronological.")
+    if "symbol" not in raw or set(raw["symbol"].astype(str)) != {"MNQ.v.0"}:
+        raise ValueError("OOS market data must use only the configured MNQ.v.0 continuous symbol.")
+    if "instrument_id" not in raw:
+        raise ValueError("OOS market data is missing Databento instrument_id contract mapping metadata.")
+    instrument_ids = pd.to_numeric(raw["instrument_id"], errors="raise")
+    if instrument_ids.isna().any() or (instrument_ids <= 0).any():
+        raise ValueError("OOS market data contains invalid Databento instrument_id values.")
+    price_volume = ("open", "high", "low", "close", "volume")
+    if any(name not in raw for name in price_volume):
+        raise ValueError("OOS market data is missing one or more OHLCV columns.")
+    values = raw[list(price_volume)].apply(pd.to_numeric, errors="raise")
+    if values.isna().any().any() or not np.isfinite(values.to_numpy(dtype=float)).all():
+        raise ValueError("OOS market data contains non-finite OHLCV values.")
+    if (values[["open", "high", "low", "close"]] <= 0).any().any() or (values["volume"] < 0).any():
+        raise ValueError("OOS market data contains non-positive prices or negative volume.")
+    if ((values["high"] < values[["open", "close", "low"]].max(axis=1)) |
+            (values["low"] > values[["open", "close", "high"]].min(axis=1))).any():
+        raise ValueError("OOS market data contains inconsistent OHLC relationships.")
+    if timestamps.empty or timestamps.iloc[-1] < end_exclusive - pd.Timedelta(minutes=1):
+        raise ValueError("OOS market data does not reach the minute immediately before the requested exclusive end.")
+    _validate_oos_interval(start, end_exclusive, data_end_exclusive)
+
+
+def _apply_data_boundary(raw: pd.DataFrame, data_end_exclusive: pd.Timestamp) -> pd.DataFrame:
+    """Return only rows strictly before the configured UTC data boundary."""
+    if "timestamp" not in raw:
+        raise ValueError("Market data has no canonical timestamp column.")
+    timestamps = pd.to_datetime(raw["timestamp"], utc=True, errors="raise")
+    if timestamps.isna().any() or timestamps.duplicated().any():
+        raise ValueError("Market data contains null or duplicate timestamps.")
+    if not timestamps.is_monotonic_increasing:
+        raise ValueError("Market data timestamps must be chronological.")
+    selected = raw.loc[timestamps < data_end_exclusive].copy()
+    if selected.empty:
+        raise ValueError("No market data exists before the configured exclusive data boundary.")
+    return selected
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run MNQ realtime PAPER (no live orders).")
     parser.add_argument("--command", choices=("run", "validate", "stop", "status", "events", "verify-checkpoint", "shadow-report", "daily-report", "analytics", "backup-database", "api"), default="run")
     parser.add_argument("--mode", choices=("PAPER",), help="Safety mode; PAPER is the only supported mode.")
     parser.add_argument("--replay-start", help="First completed bar timestamp, UTC or ISO aware.")
     parser.add_argument("--replay-end", help="Optional final timestamp for deterministic replay.")
+    parser.add_argument("--oos-run", action="store_true", help="Enable an isolated, explicitly bounded post-benchmark PAPER replay.")
+    parser.add_argument("--data-end-exclusive", help="Exclusive UTC upper bound for the raw dataset used by this OOS run.")
+    parser.add_argument("--replay-end-exclusive", help="Exclusive UTC upper bound for OOS strategy processing.")
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument(
+        "--feature-cache-dir",
+        type=Path,
+        default=PROJECT_ROOT / "data/cache/paper_causal_features",
+        help="Separate content-addressed causal feature cache directory.",
+    )
     parser.add_argument("--resume", action="store_true", help="Restore the latest valid checkpoint and continue after its last bar.")
     parser.add_argument("--checkpoint-every-bars", type=int, default=500)
     parser.add_argument("--queue-size", type=int, default=2000)
@@ -232,25 +346,92 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("Realtime Paper artificial price offset must be zero")
     start = _utc(args.replay_start)
     end = _utc(args.replay_end)
+    data_end_exclusive = _utc(args.data_end_exclusive)
+    replay_end_exclusive = _utc(args.replay_end_exclusive)
+    if args.oos_run:
+        if end is not None or data_end_exclusive is None or replay_end_exclusive is None:
+            raise SystemExit("OOS runs require --data-end-exclusive and --replay-end-exclusive, and cannot use --replay-end.")
+        try:
+            _validate_oos_interval(start, replay_end_exclusive, data_end_exclusive)
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
+        try:
+            output_dir = _validate_oos_output_dir(args.output_dir)
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
+        scope = {
+            "mode": "PAPER_OOS",
+            "start_utc_inclusive": start.isoformat(),
+            "replay_end_utc_exclusive": replay_end_exclusive.isoformat(),
+            "data_end_utc_exclusive": data_end_exclusive.isoformat(),
+        }
+    else:
+        if data_end_exclusive is not None or replay_end_exclusive is not None:
+            raise SystemExit("--data-end-exclusive and --replay-end-exclusive require --oos-run.")
+        output_dir = args.output_dir
+        data_end_exclusive = FROZEN_DATA_END_EXCLUSIVE
     if end is not None and end < start:
         raise SystemExit("--replay-end must be at or after --replay-start")
     print("MODE: PAPER — simulated fills only; no real-money order routing.", flush=True)
 
-    output_dir = args.output_dir
     events_path = output_dir / "events.jsonl"
     checkpoint_path = output_dir / "paper_checkpoint.json"
-    if not args.resume and (events_path.exists() or checkpoint_path.exists()):
+    progress_path = output_dir / "bootstrap_progress.json"
+    if not args.resume and (
+        events_path.exists() or checkpoint_path.exists() or progress_path.exists()
+        or (args.oos_run and (output_dir / "oos_run_scope.json").exists())
+    ):
         raise SystemExit("Output directory already contains a Paper run; choose a new directory or use --resume")
-    raw = load_canonical_raw_mnq()
-    # The available internal validation data is frozen at this timestamp.
-    raw = raw.loc[raw["timestamp"] <= pd.Timestamp("2026-08-26 23:59:00+00:00")].copy()
+    if args.oos_run and args.resume:
+        try:
+            _validate_oos_manifest(output_dir, scope, resume=True)
+        except (ValueError, json.JSONDecodeError) as exc:
+            raise SystemExit(str(exc)) from exc
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    progress = BootstrapProgressWriter(progress_path)
+    progress.stage("canonical_data_load")
+    raw = (
+        load_canonical_raw_mnq(include_contract_metadata=True)
+        if args.oos_run else load_canonical_raw_mnq()
+    )
+    progress.stage("data_boundary_validation", total_rows=len(raw))
+    try:
+        raw = _apply_data_boundary(raw, data_end_exclusive)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    if args.oos_run:
+        try:
+            _validate_oos_market_data(
+                raw,
+                start=start,
+                end_exclusive=replay_end_exclusive,
+                data_end_exclusive=data_end_exclusive,
+            )
+        except (ValueError, TypeError) as exc:
+            raise SystemExit(str(exc)) from exc
+        try:
+            _validate_oos_manifest(output_dir, scope, resume=args.resume)
+        except (ValueError, json.JSONDecodeError) as exc:
+            raise SystemExit(str(exc)) from exc
+    progress.update(rows_processed=len(raw), total_rows=len(raw), force=True)
+    progress.stage("session_final_bar_marking", total_rows=len(raw))
     raw = mark_replay_session_final_bars(raw)
-    if end is not None:
+    progress.update(rows_processed=len(raw), total_rows=len(raw), force=True)
+    if args.oos_run:
+        raw = raw.loc[raw["timestamp"] < replay_end_exclusive].copy()
+    elif end is not None:
         raw = raw.loc[raw["timestamp"] <= end].copy()
     history = raw.loc[raw["timestamp"] < start].copy()
     stream_frame = raw.loc[raw["timestamp"] >= start].copy()
     if history.empty or stream_frame.empty:
         raise SystemExit("The selected replay requires prior warmup history and at least one stream bar.")
+
+    progress.stage("historical_warmup_selection", total_rows=len(raw))
+    progress.update(
+        rows_processed=len(raw), total_rows=len(raw),
+        last_timestamp=history["timestamp"].iloc[-1], force=True,
+    )
 
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "cost_profile.json").write_text(
@@ -267,11 +448,43 @@ def main(argv: list[str] | None = None) -> int:
     )
     if not args.resume:
         # Causal historical bootstrap emits no Paper strategy/order events.
-        features = build_causal_context_features(history)
-        directional_ready = features["log_return"].rolling(30).count() == 30
-        features.loc[~directional_ready, "close_location_30"] = float("nan")
+        progress.stage("feature_cache_and_construction", total_rows=len(history))
+
+        def feature_progress(stage_name, rows, total, timestamp):
+            if progress.current_stage != stage_name:
+                progress.stage(stage_name, total_rows=total)
+            progress.update(
+                rows_processed=rows, total_rows=total,
+                last_timestamp=timestamp,
+                force=(rows == 0 or rows == total),
+            )
+
+        features, cache_info = load_or_build_causal_feature_cache(
+            history, args.feature_cache_dir, progress=feature_progress
+        )
+        progress.annotate("feature_cache", {
+            key: value for key, value in cache_info.items() if key != "path"
+        })
+        progress.stage("causal_hmm_bootstrap", total_rows=len(history))
+
+        def bootstrap_progress(event):
+            progress.update(
+                rows_processed=event.get("rows_processed"),
+                total_rows=event.get("total_rows"),
+                last_timestamp=event.get("last_timestamp"),
+                hmm_refit_status=event.get("hmm_refit_status"),
+                refit_timestamp=event.get("refit_timestamp"),
+                force=bool(event.get("force", False)),
+            )
+
         context_adapter.context.bootstrap_causal_history(
-            history, precomputed_features=features
+            history, precomputed_features=features,
+            progress_callback=bootstrap_progress,
+        )
+        progress.update(
+            rows_processed=len(history), total_rows=len(history),
+            last_timestamp=history["timestamp"].iloc[-1],
+            hmm_refit_status="idle", force=True,
         )
     if args.resume:
         from src.paper.realtime_checkpoint import AtomicCheckpointStore
@@ -293,6 +506,14 @@ def main(argv: list[str] | None = None) -> int:
         calendar=calendar,
         cost_policy=cost_policy,
     )
+    progress.stage("paper_service_ready")
+    if not args.resume:
+        progress.update(
+            rows_processed=len(history), total_rows=len(history),
+            last_timestamp=history["timestamp"].iloc[-1],
+            hmm_refit_status="idle", force=True,
+        )
+    progress.finish()
     # The service handles the active bar, checkpoint, and report flush.
     _run_with_graceful_signals(service, restore=args.resume)
     print(f"PAPER status: {output_dir / 'status.json'}", flush=True)

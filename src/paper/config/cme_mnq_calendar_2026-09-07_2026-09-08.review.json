@@ -1,0 +1,45 @@
+{
+  "review_status": "REVIEWED_CME_GLOBEX_EQUITIES_GROUP_FOR_MNQ",
+  "product": "MNQ",
+  "product_name": "MNQ Micro E-mini Nasdaq-100 Index Futures",
+  "venue": "CME Globex",
+  "product_view": "Futures / Equities product group",
+  "source_url": "https://www.cmegroup.com/trading-hours.html",
+  "source_timezone": "America/Chicago",
+  "timezone": "America/New_York",
+  "coverage_start": "2026-09-07",
+  "coverage_end": "2026-09-08",
+  "snapshot_identity": "e3e7e9b54be7d1ac837af69e27402dbdcd34e1b3bf9290362007a3fc8f51b277",
+  "reviewed_at_utc": "2026-10-09T10:47:50Z",
+  "selection_method": "CME Globex Trading Hours holiday selector: Labor Day, Monday 7 September 2026; select Futures and the Equities product group. CME's selector gives the Tuesday 8 September trade date as pre-open 12:00 CT and open 17:00 CT. CME defines pre-open as order entry/cancel without matching. MNQ is the Micro E-mini Nasdaq-100 futures product in CME's official Micro E-mini Equity Index FAQ.",
+  "verified_schedule": {
+    "2026-09-07": {
+      "event": "Labor Day early halt",
+      "last_matching_minute_bar_start_local": "2026-09-07T12:59:00-04:00",
+      "matching_halt_local": "2026-09-07T13:00:00-04:00",
+      "matching_halt_utc": "2026-09-07T17:00:00Z",
+      "next_trade_date": "2026-09-08",
+      "preopen_local": "2026-09-07T13:00:00-04:00",
+      "reopen_local": "2026-09-07T18:00:00-04:00",
+      "reopen_utc": "2026-09-07T22:00:00Z",
+      "normal_daily_maintenance_local": "2026-09-07T17:00:00-04:00/2026-09-07T18:00:00-04:00",
+      "disputed_180_minutes": "13:00-16:00 America/New_York are within the Labor Day halt, not expected RTH market observations."
+    },
+    "2026-09-08": {
+      "session": "Regular Globex session resumes; regular RTH 09:30-16:00 America/New_York.",
+      "rth_start_utc": "2026-09-08T13:30:00Z",
+      "rth_end_utc_exclusive": "2026-09-08T20:00:00Z"
+    }
+  },
+  "evidence": [
+    {
+      "url": "https://www.cmegroup.com/trading-hours.html",
+      "fact": "The Labor Day selector identifies the holiday date span as September 6-8, 2026. The product-group schedule for Equities assigns the September 8 trade date pre-open 12:00 CT and open 17:00 CT. The page says its session times are CT and defines pre-open as no matching."
+    },
+    {
+      "url": "https://www.cmegroup.com/articles/faqs/micro-e-mini-equity-index-futures-frequently-asked-questions.html",
+      "fact": "CME identifies MNQ as Micro E-mini Nasdaq-100 futures in its Micro E-mini Equity Index product materials."
+    }
+  ],
+  "limitations": "CME's accessible 2026 holiday selector presents this schedule at the Equities product-group level rather than a distinct MNQ symbol row. The product relationship is established by CME's own MNQ product material. This narrow review certifies only September 7-8, 2026; it is not a historical calendar certification for 2019-2026."
+}

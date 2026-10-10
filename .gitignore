@@ -2,6 +2,11 @@
 __pycache__/
 *.py[cod]
 .venv/
+.venv-dashboard/
+.venv-ibkr-diagnostic/
+dashboard-test-tmp/
+dashboard-*-tmp*/
+.bootstrap-artifact-test-*/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
@@ -9,6 +14,9 @@ __pycache__/
 # Environment
 .env
 .env.*
+/.streamlit/secrets.toml
+/.test_scratch/
+/.recovery_validation/
 
 # IDE / OS
 .vscode/
@@ -18,6 +26,7 @@ Thumbs.db
 
 # Raw market data
 data/raw/
+/data/cache/paper_causal_features/
 
 # Research generated results
 src/research/**/results/
@@ -39,3 +48,8 @@ autonomous_raw_strategy_trades.csv
 # Logs
 *.log
 *.tmp
+
+# Python generated files
+__pycache__/
+*.pyc
+*.pyo

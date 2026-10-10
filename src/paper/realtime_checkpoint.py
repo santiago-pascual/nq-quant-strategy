@@ -22,7 +22,13 @@ CHECKPOINT_SCHEMA_VERSION = 1
 
 
 def runtime_identity() -> dict[str, Any]:
-    """Identity of code and numerical dependencies needed to resume safely."""
+    """Versioned execution and reporting identity used for Paper recovery."""
+    from src.paper.runtime_compatibility import (
+        IDENTITY_SCHEMA_VERSION,
+        COMPATIBILITY_POLICY_VERSION,
+        REPORTING_SCHEMA_VERSION,
+        compatibility_policy_sha256,
+    )
     root = Path(__file__).resolve().parents[2]
     source_paths = (
         "src/models/causal_hmm.py",
@@ -32,6 +38,7 @@ def runtime_identity() -> dict[str, Any]:
         "src/paper/run_autonomous.py",
         "src/paper/realtime_service.py",
         "src/paper/realtime_checkpoint.py",
+        "src/paper/delayed_paper_cli.py",
         "src/paper/logger.py",
         "src/paper/realtime_market_data.py",
         "src/paper/run_realtime_paper.py",
@@ -40,6 +47,7 @@ def runtime_identity() -> dict[str, Any]:
         "src/paper/costs.py",
         "src/paper/analytics.py",
         "src/paper/analytics_db.py",
+        "src/paper/ibkr_paper_recovery.py",
         "src/execution/engine.py",
         "src/broker/adapter.py",
         "src/portfolio/conflict.py",
@@ -53,20 +61,38 @@ def runtime_identity() -> dict[str, Any]:
     for relative in source_paths:
         path = root / relative
         files[relative] = sha256(path.read_bytes()).hexdigest()
+    files["src/paper/runtime_compatibility.py"] = compatibility_policy_sha256()
     packages = {}
     for package in ("numpy", "pandas", "scikit-learn", "hmmlearn"):
         try:
             packages[package] = version(package)
         except PackageNotFoundError:
             packages[package] = None
+    execution_sources = {key: value for key, value in files.items()
+                         if key != "src/paper/analytics.py"}
     return {
+        "identity_schema_version": IDENTITY_SCHEMA_VERSION,
+        "compatibility_policy_version": COMPATIBILITY_POLICY_VERSION,
         "python": platform.python_version(),
         "packages": packages,
         "source_sha256": files,
+        "execution_fingerprint": {
+            "schema_version": IDENTITY_SCHEMA_VERSION,
+            "source_sha256": execution_sources,
+        },
+        "reporting_fingerprint": {
+            "schema_version": REPORTING_SCHEMA_VERSION,
+            "source_sha256": {"src/paper/analytics.py": files["src/paper/analytics.py"]},
+        },
     }
 
 
 def _encode(value: Any) -> Any:
+    # str-backed Enum members (for example RiskDecision) are also isinstance
+    # checks for str. Preserve their type so restored execution decisions keep
+    # their enum semantics rather than becoming bare strings.
+    if isinstance(value, Enum):
+        return {"$enum": f"{type(value).__module__}:{type(value).__qualname__}", "value": value.value}
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     if isinstance(value, np.generic):
@@ -77,8 +103,6 @@ def _encode(value: Any) -> Any:
         return {"$type": "datetime", "value": value.isoformat()}
     if isinstance(value, date):
         return {"$type": "date", "value": value.isoformat()}
-    if isinstance(value, Enum):
-        return {"$enum": f"{type(value).__module__}:{type(value).__qualname__}", "value": value.value}
     if is_dataclass(value):
         return {
             "$dataclass": f"{type(value).__module__}:{type(value).__qualname__}",
@@ -86,7 +110,15 @@ def _encode(value: Any) -> Any:
         }
     if isinstance(value, Mapping):
         return {str(key): _encode(item) for key, item in value.items()}
-    if isinstance(value, (tuple, list, set, np.ndarray)):
+    if isinstance(value, set):
+        # Set iteration order is process/hash-seed dependent. Sort by a stable
+        # JSON representation so equivalent restored execution state produces
+        # byte-stable checkpoint payloads across restarts.
+        encoded = [_encode(item) for item in value]
+        return sorted(encoded, key=lambda item: json.dumps(
+            item, sort_keys=True, separators=(",", ":"), allow_nan=True
+        ))
+    if isinstance(value, (tuple, list, np.ndarray)):
         return [_encode(item) for item in value]
     raise TypeError(f"Unsupported runtime checkpoint value: {type(value).__name__}")
 
@@ -129,6 +161,9 @@ def engine_fingerprint(engine: Any) -> str:
 
     config = {
         "engine": dataclass_asdict(engine.config),
+        "execution": {
+            "deterministic_ids": bool(getattr(engine.execution, "deterministic_ids", False)),
+        },
         "risk": dataclass_asdict(engine.risk.limits),
         "strategies": [
             {
@@ -146,13 +181,13 @@ def engine_fingerprint(engine: Any) -> str:
 
 
 def capture_engine_state(engine: Any) -> dict[str, Any]:
-    """Capture engine state at a completed-bar boundary; pending orders fail closed."""
-    if engine._pending_risk_results or engine._pending_entry_requests or engine._simulated_orders:
-        raise RuntimeError("Checkpoint requires a completed bar with no pending simulated orders")
+    """Capture completed-bar state, including unsettled in-memory Paper orders."""
     execution = engine.execution
     broker = engine.broker
     if not all(hasattr(broker, name) for name in ("_orders", "_fills", "_positions", "_order_counter")):
         raise TypeError("Realtime Paper checkpoints currently require the in-memory Paper broker")
+    if not hasattr(engine.broker_execution, "_broker_orders"):
+        raise TypeError("Realtime Paper checkpoints require the in-memory broker execution coordinator")
     strategies: dict[str, Any] = {}
     for strategy in engine.strategies:
         if strategy.name in {"MRL1", "MRS2"}:
@@ -237,6 +272,14 @@ def capture_engine_state(engine: Any) -> dict[str, Any]:
             "order_counter": broker._order_counter,
             "fill_counter": broker._fill_counter,
         },
+        "pending_execution": {
+            "risk_results": engine._pending_risk_results,
+            "entry_requests": engine._pending_entry_requests,
+            "simulated_orders": engine._simulated_orders,
+            "strategy_orders": engine._pending_strategy_orders,
+            "broker_submissions": engine.broker_execution._broker_orders,
+            "newly_filled_strategies": engine._newly_filled_strategies,
+        },
         "strategies": strategies,
     })
 
@@ -276,11 +319,16 @@ def restore_engine_state(engine: Any, encoded_state: Mapping[str, Any]) -> None:
     broker._positions = state["broker"]["positions"]
     broker._order_counter = int(state["broker"]["order_counter"])
     broker._fill_counter = int(state["broker"]["fill_counter"])
-    # A durable checkpoint is only produced after all market-order fills settle.
-    engine._pending_risk_results.clear()
-    engine._pending_entry_requests.clear()
-    engine._pending_strategy_orders.clear()
-    engine._simulated_orders.clear()
+    pending = state.get("pending_execution", {})
+    engine._pending_risk_results = dict(pending.get("risk_results", {}))
+    engine._pending_entry_requests = dict(pending.get("entry_requests", {}))
+    engine._simulated_orders = dict(pending.get("simulated_orders", {}))
+    engine._pending_strategy_orders = {
+        name: set(order_ids) for name, order_ids in pending.get("strategy_orders", {}).items()
+    }
+    engine.broker_execution._broker_orders = dict(pending.get("broker_submissions", {}))
+    engine._newly_filled_strategies = set(pending.get("newly_filled_strategies", []))
+    _validate_pending_execution(engine)
     for strategy in engine.strategies:
         saved = state["strategies"][strategy.name]
         if saved["kind"] == "mean_reversion":
@@ -306,6 +354,30 @@ def restore_engine_state(engine: Any, encoded_state: Mapping[str, Any]) -> None:
                 setattr(recovery, f"_{key}" if key == "last_bar" else key, value)
             strategy.fitted_model = saved["fitted_model"]
             strategy.model_window = saved["model_window"]
+
+
+def _validate_pending_execution(engine: Any) -> None:
+    """Reject a checkpoint whose unsettled order references cannot be resumed."""
+    broker_ids = set(engine.broker._orders)
+    coordinator_ids = set(engine.broker_execution._broker_orders)
+    strategy_ids = {
+        order_id for order_ids in engine._pending_strategy_orders.values()
+        for order_id in order_ids
+    }
+    pending_risk_ids = set(engine._pending_risk_results)
+    pending_entry_ids = set(engine._pending_entry_requests)
+    simulated_ids = set(engine._simulated_orders)
+    if not (coordinator_ids <= broker_ids and strategy_ids <= broker_ids
+            and strategy_ids <= coordinator_ids):
+        raise ValueError("checkpoint pending-order references are inconsistent")
+    if not (pending_risk_ids == pending_entry_ids
+            and pending_risk_ids <= strategy_ids
+            and simulated_ids <= strategy_ids):
+        raise ValueError("checkpoint pending-entry authorization is inconsistent")
+    for order_id in pending_risk_ids:
+        submission = engine.broker_execution._broker_orders[order_id]
+        if submission.execution_intent.action.value != "enter":
+            raise ValueError("checkpoint pending-entry authorization references a non-entry order")
 
 
 class AtomicCheckpointStore:

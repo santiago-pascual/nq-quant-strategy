@@ -1,11 +1,13 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 import json
 from pathlib import Path
+import shutil
 import threading
 import time
 from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 import pandas as pd
@@ -31,6 +33,13 @@ from src.strategies.orb.strategy import ORBStrategy
 def _bar(minute: int, *, day: int = 2) -> CanonicalBar:
     ts = datetime(2024, 1, day, 14, 30, tzinfo=timezone.utc) + timedelta(minutes=minute)
     return CanonicalBar("MNQ", ts, 100.0, 100.5, 99.5, 100.0, 1000.0, provider="test")
+
+
+def _regular_calendar(day: date) -> CMETradingCalendar:
+    return CMETradingCalendar(CMECalendarSnapshot(
+        version=f"fixture-regular-{day.isoformat()}", source=CME_HOLIDAY_SOURCE,
+        coverage_start=day, coverage_end=day,
+    ))
 
 
 def test_canonical_bar_requires_timezone_and_completed_finite_ohlcv():
@@ -81,6 +90,7 @@ def test_in_session_gap_is_backfilled_before_the_newer_bar(tmp_path):
     service = RealtimePaperService(
         source=source, engine=engine, context_adapter=adapter,
         config=RealtimePaperConfig(mode="PAPER", output_dir=tmp_path),
+        calendar=_regular_calendar(previous.timestamp.date()),
     )
 
     assert service._process(previous)
@@ -106,6 +116,7 @@ def test_incomplete_backfill_fails_closed_before_new_bar_reaches_engine(tmp_path
     service = RealtimePaperService(
         source=source, engine=engine, context_adapter=adapter,
         config=RealtimePaperConfig(mode="PAPER", output_dir=tmp_path),
+        calendar=_regular_calendar(previous.timestamp.date()),
     )
     assert service._process(previous)
     with pytest.raises(RuntimeError, match="backfill failed closed"):
@@ -240,6 +251,7 @@ def test_realtime_service_fails_closed_when_missing_rth_minute_cannot_be_backfil
     service = RealtimePaperService(
         source=ReplayMarketDataSource([]), engine=engine, context_adapter=adapter,
         config=RealtimePaperConfig(mode="PAPER", output_dir=tmp_path),
+        calendar=_regular_calendar(_bar(0).timestamp.date()),
     )
     engine.connect()
     try:
@@ -251,6 +263,89 @@ def test_realtime_service_fails_closed_when_missing_rth_minute_cannot_be_backfil
         assert service._last_bar.timestamp == _bar(0).timestamp
     finally:
         engine.disconnect()
+
+
+def test_september_7_2026_gap_requires_calendar_instead_of_inventing_180_rth_minutes():
+    previous = CanonicalBar("MNQ", datetime(2026, 9, 7, 16, 59, tzinfo=timezone.utc),
+                            100, 101, 99, 100, 1000)
+    reopened = CanonicalBar("MNQ", datetime(2026, 9, 7, 22, 0, tzinfo=timezone.utc),
+                            100, 101, 99, 100, 1000)
+    service = object.__new__(RealtimePaperService)
+    service._last_bar = previous
+    service.calendar = None
+    service._state = "RUNNING"
+    events = []
+    service._emit = lambda event_type, payload, **kwargs: events.append((event_type, payload))
+    service._write_status = lambda: None
+    with pytest.raises(RuntimeError, match="CME calendar unavailable; cannot classify"):
+        service._backfill_gap_before(reopened)
+    assert not any(event_type is PaperEventType.MISSING_BAR for event_type, _ in events)
+    failed = [payload for event_type, payload in events if event_type is PaperEventType.BACKFILL_FAILED]
+    assert len(failed) == 1
+    assert "cannot classify" in failed[0]["reason"]
+    assert failed[0]["last_processed_timestamp"] == previous.timestamp.isoformat()
+
+
+def test_adjacent_rth_bars_need_no_calendar_gap_classification():
+    previous = CanonicalBar("MNQ", datetime(2026, 9, 8, 13, 30, tzinfo=timezone.utc),
+                            100, 101, 99, 100, 1000)
+    adjacent = CanonicalBar("MNQ", datetime(2026, 9, 8, 13, 31, tzinfo=timezone.utc),
+                            100, 101, 99, 100, 1000)
+    service = object.__new__(RealtimePaperService)
+    service._last_bar = previous
+    service.calendar = None
+    service._state = "RUNNING"
+    events = []
+    service._emit = lambda event_type, payload, **kwargs: events.append((event_type, payload))
+    service._write_status = lambda: None
+
+    service._backfill_gap_before(adjacent)
+
+    assert events == []
+
+
+def test_verified_labor_day_halt_does_not_count_the_replay_gap_as_missing_minutes():
+    # Narrow fixture for the interval only: 13:00–17:00 New York is closed;
+    # the regular 17:00–18:00 maintenance break follows, then Sep 8 opens.
+    calendar = CMETradingCalendar(CMECalendarSnapshot(
+        version="fixture-2026-labor-day-gap", source=CME_HOLIDAY_SOURCE,
+        coverage_start=date(2026, 9, 7), coverage_end=date(2026, 9, 8),
+        exceptions={"2026-09-07": {
+            "session_type": "special", "rth_start": "09:30", "rth_end": "16:00",
+            "globex_open": "18:00", "globex_close": "17:00",
+            "closed_intervals": [["13:00", "17:00"]],
+        }},
+    ))
+    missing = calendar.expected_missing_minutes(
+        pd.Timestamp("2026-09-07T16:59:00Z"), pd.Timestamp("2026-09-07T22:00:00Z")
+    )
+    assert missing == []
+
+
+def test_calendar_classifies_a_genuine_regular_session_missing_bar_and_backfill_still_fails():
+    previous = CanonicalBar("MNQ", datetime(2024, 1, 2, 14, 30, tzinfo=timezone.utc),
+                            100, 101, 99, 100, 1000)
+    newest = CanonicalBar("MNQ", datetime(2024, 1, 2, 14, 33, tzinfo=timezone.utc),
+                          100, 101, 99, 100, 1000)
+    service = object.__new__(RealtimePaperService)
+    service._last_bar = previous
+    service.calendar = _regular_calendar(date(2024, 1, 2))
+    service.source = SimpleNamespace(backfill=lambda **kwargs: [])
+    service.config = SimpleNamespace(symbol="MNQ")
+    service._state = "RUNNING"
+    events = []
+    service._emit = lambda event_type, payload, **kwargs: events.append((event_type, payload))
+    service._write_status = lambda: None
+    with pytest.raises(RuntimeError, match="omitted 2 expected open-market bars"):
+        service._backfill_gap_before(newest)
+    missing = [payload for event_type, payload in events if event_type is PaperEventType.MISSING_BAR]
+    assert len(missing) == 1
+    assert missing[0]["missing_minute_count"] == 2
+    assert missing[0]["expected_timestamps"] == [
+        "2024-01-02T14:31:00+00:00", "2024-01-02T14:32:00+00:00",
+    ]
+    failed = [payload for event_type, payload in events if event_type is PaperEventType.BACKFILL_FAILED]
+    assert failed[-1]["last_processed_timestamp"] == previous.timestamp.isoformat()
 
 
 def test_candidate_accounting_distinguishes_risk_and_conflict_rejection(tmp_path):
@@ -383,9 +478,8 @@ def test_realtime_checkpoint_restart_matches_uninterrupted_bar_stream(tmp_path):
     bars = [_bar(i) for i in range(6)]
     baseline_dir = tmp_path / "baseline"
     baseline_events = _run_service(str(baseline_dir), bars)
-
     resumed_dir = tmp_path / "resumed"
-    first_events = _run_service(str(resumed_dir), bars[:3])
+    _run_service(str(resumed_dir), bars[:3])
     assert (resumed_dir / "paper_checkpoint.json").exists()
     second_events = _run_service(str(resumed_dir), bars[3:], resume=True)
 
@@ -563,3 +657,134 @@ def test_open_orb_position_and_risk_state_restore(tmp_path):
     assert restored.risk.open_risk == engine.risk.open_risk
     assert restored.risk.daily_trade_count == engine.risk.daily_trade_count
     assert restored.strategies[0].in_trade
+
+
+def test_replay_data_boundary_keeps_frozen_default_and_allows_explicit_oos_extension():
+    from src.paper.run_realtime_paper import (
+        FROZEN_DATA_END_EXCLUSIVE,
+        _apply_data_boundary,
+    )
+
+    raw = pd.DataFrame({
+        "timestamp": pd.to_datetime([
+            "2026-08-26T23:59:00Z",
+            "2026-08-27T00:00:00Z",
+            "2026-10-08T23:59:00Z",
+        ], utc=True),
+        "close": [100.0, 101.0, 102.0],
+    })
+    frozen = _apply_data_boundary(raw, FROZEN_DATA_END_EXCLUSIVE)
+    assert frozen["timestamp"].tolist() == [pd.Timestamp("2026-08-26T23:59:00Z")]
+
+    extended = _apply_data_boundary(raw, pd.Timestamp("2026-10-09T00:00:00Z"))
+    assert len(extended) == 3
+    assert extended["timestamp"].iloc[-1] == pd.Timestamp("2026-10-08T23:59:00Z")
+
+
+def test_oos_scope_rejects_invalid_output_and_market_contract():
+    from src.paper import run_realtime_paper
+
+    project = run_realtime_paper.PROJECT_ROOT
+    with pytest.raises(ValueError, match="results/paper/oos_*"):
+        run_realtime_paper._validate_oos_output_dir(project / "results/paper/full_research_replay_final_v3")
+    with pytest.raises(ValueError, match="start < replay-end-exclusive"):
+        run_realtime_paper._validate_oos_interval(
+            pd.Timestamp("2026-08-27T00:00:00Z"),
+            pd.Timestamp("2026-08-27T00:00:00Z"),
+            pd.Timestamp("2026-08-28T00:00:00Z"),
+        )
+    with pytest.raises(ValueError, match="start at or after"):
+        run_realtime_paper._validate_oos_interval(
+            pd.Timestamp("2026-08-26T23:59:00Z"),
+            pd.Timestamp("2026-08-28T00:00:00Z"),
+            pd.Timestamp("2026-08-28T00:00:00Z"),
+        )
+
+    start = pd.Timestamp("2026-08-27T00:00:00Z")
+    end = pd.Timestamp("2026-08-27T00:02:00Z")
+    raw = pd.DataFrame({
+        "timestamp": pd.date_range(start, periods=2, freq="min"),
+        "symbol": ["MNQ.v.0"] * 2,
+        "instrument_id": [42004946] * 2,
+        "open": [100.0] * 2,
+        "high": [101.0] * 2,
+        "low": [99.0] * 2,
+        "close": [100.0] * 2,
+        "volume": [1.0] * 2,
+    })
+    run_realtime_paper._validate_oos_market_data(
+        raw, start=start, end_exclusive=end, data_end_exclusive=end,
+    )
+    with pytest.raises(ValueError, match="MNQ.v.0"):
+        run_realtime_paper._validate_oos_market_data(
+            raw.assign(symbol=["MNQ.v.0", "NQ.v.0"]),
+            start=start, end_exclusive=end, data_end_exclusive=end,
+        )
+    with pytest.raises(ValueError, match="immediately before"):
+        run_realtime_paper._validate_oos_market_data(
+            raw.iloc[:1], start=start, end_exclusive=end, data_end_exclusive=end,
+        )
+
+
+def test_oos_replay_checkpoint_resume_is_scoped_and_idempotent(monkeypatch):
+    import numpy as np
+    from src.paper import run_realtime_paper
+
+    project = run_realtime_paper.PROJECT_ROOT
+    rows = []
+    ordinal = 0
+    for day in (2, 3):
+        begin = datetime(2024, 1, day, 14, 30, tzinfo=timezone.utc)
+        for minute in range(300):
+            close = 100.0 + ordinal * 0.002 + float(np.sin(ordinal / 11.0)) * 0.1
+            rows.append({
+                "timestamp": begin + timedelta(minutes=minute),
+                "open": close - 0.02, "high": close + 0.5,
+                "low": close - 0.5, "close": close, "volume": 1000.0,
+                "symbol": "MNQ.v.0", "instrument_id": 42004946,
+            })
+            ordinal += 1
+    start = pd.Timestamp("2026-08-27T00:00:00Z")
+    for minute in range(2):
+        rows.append({
+            "timestamp": start + pd.Timedelta(minutes=minute),
+            "open": 100.0, "high": 100.5, "low": 99.5,
+            "close": 100.0, "volume": 1000.0,
+            "symbol": "MNQ.v.0", "instrument_id": 42004946,
+        })
+    raw = pd.DataFrame(rows)
+    monkeypatch.setattr(
+        run_realtime_paper,
+        "load_canonical_raw_mnq",
+        lambda **kwargs: raw.copy(),
+    )
+    output = project / "results/paper" / f"oos_20260827_smoke_{uuid4().hex}"
+    cost_config = Path(__file__).parents[2] / "src/paper/config/topstepx_mnq_fees_2026-07.json"
+    args = [
+        "--command", "run", "--mode", "PAPER",
+        "--replay-start", start.isoformat(),
+        "--output-dir", str(output), "--cost-config", str(cost_config),
+        "--checkpoint-every-bars", "1",
+        "--oos-run", "--data-end-exclusive", "2026-08-27T00:02:00Z",
+        "--replay-end-exclusive", "2026-08-27T00:02:00Z",
+        "--feature-cache-dir", str(output / "feature-cache"),
+    ]
+    try:
+        assert run_realtime_paper.main(args) == 0
+        events_path = output / "events.jsonl"
+        initial_events = [json.loads(line) for line in events_path.read_text(encoding="utf-8").splitlines() if line]
+        market_count = sum(row["event_type"] == "market_data" for row in initial_events)
+        assert market_count == 2
+        assert json.loads((output / "oos_run_scope.json").read_text(encoding="utf-8"))["mode"] == "PAPER_OOS"
+        bootstrap_progress = json.loads((output / "bootstrap_progress.json").read_text(encoding="utf-8"))
+        assert bootstrap_progress["completed"] is True
+        assert bootstrap_progress["current_stage"] == "completed"
+        assert bootstrap_progress["historical_rows_processed"] == bootstrap_progress["historical_rows_total"]
+        assert bootstrap_progress["last_processed_timestamp_utc"] is not None
+
+        assert run_realtime_paper.main(args + ["--resume"]) == 0
+        resumed_events = [json.loads(line) for line in events_path.read_text(encoding="utf-8").splitlines() if line]
+        assert sum(row["event_type"] == "market_data" for row in resumed_events) == market_count
+    finally:
+        if output.exists():
+            shutil.rmtree(output)

@@ -769,6 +769,19 @@ class ScheduledCausalHMMStream:
         assert self.initial_fit_timestamp is not None
         return current_time >= self.initial_fit_timestamp
 
+    def refit_due(self, timestamp: Any) -> bool:
+        """Return whether this timestamp reaches the existing fit schedule."""
+        current_time = _utc(timestamp)
+        if self.next_refit_timestamp is not None and current_time >= self.next_refit_timestamp:
+            return True
+        if self.model is not None:
+            return False
+        if self.schedule == "rolling" and self.initial_fit_timestamp is None:
+            # The first eligible row initializes the rolling window anchor in
+            # update(); it cannot itself trigger a two-year initial fit.
+            return False
+        return self._initial_fit_due(current_time)
+
     def _training_frame(self, live_start: pd.Timestamp) -> pd.DataFrame:
         start, stop = self._training_bounds(live_start)
         return self._history.frame(start, stop)

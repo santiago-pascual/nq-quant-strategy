@@ -50,7 +50,10 @@ def build_real_paper_engine(
     broker = InMemoryBrokerAdapter()
     engine = PaperTradingEngine(
         strategies=strategies,
-        execution=ExecutionEngine(),
+        # Stable Paper-only order/fill IDs make a replayed uncommitted bar
+        # converge to the same durable state after process recovery. Historical
+        # Research execution keeps ExecutionEngine's legacy UUID default.
+        execution=ExecutionEngine(deterministic_ids=True),
         risk=RiskEngine(XFA_50K_PRODUCTION_POLICY.to_risk_limits()),
         conflict=PortfolioConflictEngine(max_concurrent_positions=3),
         broker=broker,

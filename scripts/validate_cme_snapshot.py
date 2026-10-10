@@ -18,23 +18,18 @@ if str(PROJECT_ROOT) not in sys.path:
 from src.paper.cme_calendar import CMECalendarSnapshot, CME_HOLIDAY_SOURCE
 
 
-REQUIRED_START = "2026-10-08"
-REQUIRED_END = "2026-10-31"
-
-
 def validate(snapshot_path: Path, review_path: Path) -> dict:
     snapshot = CMECalendarSnapshot.from_json(snapshot_path)
     review = json.loads(review_path.read_text(encoding="utf-8"))
     errors = []
     if snapshot.source != CME_HOLIDAY_SOURCE:
         errors.append("snapshot source must be the official CME trading-hours page")
-    if snapshot.coverage_start.isoformat() != REQUIRED_START or snapshot.coverage_end.isoformat() != REQUIRED_END:
-        errors.append(f"snapshot must cover exactly {REQUIRED_START} through {REQUIRED_END}")
     if review.get("source_url") != CME_HOLIDAY_SOURCE:
         errors.append("review source_url must identify the official CME schedule")
     if review.get("product") != "MNQ":
         errors.append("review record must specify product MNQ")
-    if review.get("venue") != "CME Globex" or review.get("product_view") != "Futures":
+    if (review.get("venue") != "CME Globex"
+            or "Futures" not in str(review.get("product_view", ""))):
         errors.append("review record must identify CME Globex Futures product-filtered evidence")
     if review.get("product_name") != "MNQ Micro E-mini Nasdaq-100 Index Futures":
         errors.append("review record must identify the exact MNQ product row")
@@ -43,12 +38,13 @@ def validate(snapshot_path: Path, review_path: Path) -> dict:
     if not review.get("selection_method"):
         errors.append("review record must describe the CME date/product selection")
     verified_schedule = review.get("verified_schedule", {})
-    if not verified_schedule.get("october_12_2026"):
-        errors.append("review record must state the product-filtered October 12 finding")
+    if not isinstance(verified_schedule, dict) or not verified_schedule:
+        errors.append("review record must include at least one verified schedule finding")
     if review.get("timezone") != "America/New_York":
         errors.append("review record timezone must be America/New_York")
-    if review.get("coverage_start") != REQUIRED_START or review.get("coverage_end") != REQUIRED_END:
-        errors.append(f"review record must cover {REQUIRED_START} through {REQUIRED_END}")
+    if (review.get("coverage_start") != snapshot.coverage_start.isoformat()
+            or review.get("coverage_end") != snapshot.coverage_end.isoformat()):
+        errors.append("review record coverage must exactly match snapshot coverage")
     if not review.get("reviewed_at_utc"):
         errors.append("reviewed_at_utc is required")
     else:
@@ -66,6 +62,9 @@ def validate(snapshot_path: Path, review_path: Path) -> dict:
     ]
     if out_of_coverage:
         errors.append(f"snapshot exceptions fall outside declared coverage: {out_of_coverage}")
+    uncovered_exceptions = set(snapshot.exceptions) - set(verified_schedule)
+    if uncovered_exceptions:
+        errors.append(f"review record does not identify snapshot exceptions: {sorted(uncovered_exceptions)}")
     if errors:
         raise ValueError("; ".join(errors))
     return {"valid": True, "version": snapshot.version,

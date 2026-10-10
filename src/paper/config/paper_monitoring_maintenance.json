@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "events": [
+    {
+      "id": "mnq-reviewed-calendar-coverage-ends-2026-10-31",
+      "kind": "cme_calendar",
+      "label": "Approved snapshot coverage ends after October 31 New York date; later sessions require a new reviewed calendar. This is a review deadline, not a new CME holiday exception.",
+      "effective_at_utc": "2026-11-01T04:00:00Z",
+      "reviewed": true,
+      "source_url": "https://www.cmegroup.com/trading-hours.html",
+      "evidence_path": "src/paper/config/cme_mnq_calendar_2026-10-08_2026-10-31.review.json",
+      "snapshot_identity": "52c086bf05d5f15edd9e1772c5cea030059a9ce71d0e019499bba72c5eebdf15"
+    }
+  ]
+}

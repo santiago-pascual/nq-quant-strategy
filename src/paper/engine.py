@@ -782,7 +782,11 @@ class PaperTradingEngine:
                 "entry_price": entry_price,
                 "stop_price": stop_price,
                 "point_value": self.config.point_value,
-                "account_equity": account_equity,
+                # Persist a stable numeric representation across checkpoint
+                # restore (which restores account balances as floats). This
+                # affects event identity only; risk evaluation still uses the
+                # unchanged RiskRequest/account value below.
+                "account_equity": float(account_equity),
                 "risk_per_contract": risk_per_contract,
                 "risk_budget_override": risk_budget_override,
                 "adaptive_quantity": adaptive_quantity,

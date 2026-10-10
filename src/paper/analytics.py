@@ -13,6 +13,18 @@ from urllib.parse import quote
 
 
 STRATEGIES = ("MRL1", "MRS2", "S2R", "ORB")
+TRADE_LIST_COLUMNS = (
+    "trade_id", "strategy", "direction", "quantity", "entry_timestamp_utc", "entry_fill_price",
+    "exit_timestamp_utc", "exit_fill_price", "gross_pnl", "commission", "exchange_fees",
+    "regulatory_fees", "total_costs", "net_pnl", "realized_r", "duration_seconds",
+    "exit_reason", "status",
+)
+TRADE_METRIC_COLUMNS = (
+    "trade_id", "strategy", "exit_timestamp_utc", "net_pnl", "gross_pnl", "total_costs",
+    "commission", "exchange_fees", "regulatory_fees", "realized_r", "duration_seconds",
+    "quantity", "mae_points", "mfe_points", "hmm_state", "signal_timestamp_utc",
+    "order_timestamp_utc", "entry_timestamp_utc", "initial_risk_usd", "direction",
+)
 
 
 def _ratio(a: float, b: float) -> float | None:
@@ -68,6 +80,9 @@ def _trade_metrics(trades: list[Mapping[str, Any]]) -> dict[str, Any]:
     return {
         "trades": len(trades), "gross_pnl": sum(gross),
         "total_costs": sum(float(t["total_costs"]) for t in trades if t.get("total_costs") is not None),
+        "commissions": sum(float(t["commission"]) for t in trades if t.get("commission") is not None),
+        "exchange_fees": sum(float(t["exchange_fees"]) for t in trades if t.get("exchange_fees") is not None),
+        "regulatory_fees": sum(float(t["regulatory_fees"]) for t in trades if t.get("regulatory_fees") is not None),
         "net_pnl": sum(net), "cumulative_r": sum(rs),
         "win_rate": len(winners) / len(net) if net else None,
         "profit_factor": _ratio(sum(winners), abs(sum(losers))),
@@ -251,7 +266,173 @@ class PaperAnalyticsReader:
         return {key: _trade_metrics(items) for key, items in groups.items()}
 
     def recent_trades(self, limit: int = 50) -> list[dict[str, Any]]:
-        return [dict(r) for r in self._db.execute("SELECT * FROM trades ORDER BY entry_timestamp_utc DESC LIMIT ?", (limit,))]
+        safe_limit = max(1, min(int(limit), 1000))
+        columns = ",".join(TRADE_LIST_COLUMNS)
+        return [dict(r) for r in self._db.execute(f"SELECT {columns} FROM trades ORDER BY entry_timestamp_utc DESC LIMIT ?", (safe_limit,))]
+
+    def filtered_trades(self, *, limit: int = 500, strategy: str | None = None,
+                        start: str | None = None, end: str | None = None) -> list[dict[str, Any]]:
+        """Return a bounded entry-time filtered trade page for the read-only UI."""
+        clauses: list[str] = []
+        params: list[Any] = []
+        if strategy:
+            clauses.append("strategy=?")
+            params.append(strategy)
+        if start:
+            clauses.append("entry_timestamp_utc>=?")
+            params.append(start)
+        if end:
+            clauses.append("entry_timestamp_utc<?")
+            params.append(end)
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        params.append(max(1, min(int(limit), 1000)))
+        columns = ",".join(TRADE_LIST_COLUMNS)
+        return [dict(r) for r in self._db.execute(
+            f"SELECT {columns} FROM trades" + where + " ORDER BY entry_timestamp_utc DESC LIMIT ?", tuple(params)
+        )]
+
+    def dashboard_analytics(self, *, limit: int = 5000, strategy: str | None = None,
+                            start: str | None = None, end: str | None = None) -> dict[str, Any]:
+        """Analytics over a clearly identified bounded sample of closed trades."""
+        clauses = ["status='CLOSED'"]
+        params: list[Any] = []
+        if strategy:
+            clauses.append("strategy=?")
+            params.append(strategy)
+        if start:
+            clauses.append("exit_timestamp_utc>=?")
+            params.append(start)
+        if end:
+            clauses.append("exit_timestamp_utc<?")
+            params.append(end)
+        where = " AND ".join(clauses)
+        total = int(self._db.execute("SELECT COUNT(*) FROM trades WHERE " + where, tuple(params)).fetchone()[0])
+        safe_limit = max(1, min(int(limit), 5000))
+        # Monitoring may read runs created by earlier Paper schema versions.
+        # Optional telemetry is projected as NULL rather than making the
+        # entire read-only analytics endpoint fail on an older database.
+        available_columns = {str(row[1]) for row in self._db.execute("PRAGMA table_info(trades)")}
+        columns = ",".join(
+            column if column in available_columns else f"NULL AS {column}"
+            for column in TRADE_METRIC_COLUMNS
+        )
+        rows = [dict(r) for r in self._db.execute(
+            f"SELECT {columns} FROM trades WHERE " + where + " ORDER BY exit_timestamp_utc DESC LIMIT ?",
+            (*params, safe_limit),
+        )]
+        rows.reverse()
+        metrics = _trade_metrics(rows)
+        local = ZoneInfo("America/New_York")
+        by_day: dict[str, list[dict[str, Any]]] = {}
+        by_strategy: dict[str, list[dict[str, Any]]] = {}
+        cumulative = 0.0
+        cumulative_r = 0.0
+        equity = []
+        r_equity = []
+        pnl_rows = []
+        outcomes = []
+        by_hmm: dict[str, list[dict[str, Any]]] = {}
+        for row in rows:
+            name = str(row.get("strategy") or "UNAVAILABLE")
+            by_strategy.setdefault(name, []).append(row)
+            if row.get("exit_timestamp_utc"):
+                stamp_text = str(row["exit_timestamp_utc"])
+                stamp = datetime.fromisoformat(stamp_text.replace("Z", "+00:00")).astimezone(local)
+                by_day.setdefault(stamp.date().isoformat(), []).append(row)
+            net = row.get("net_pnl")
+            realized_r = row.get("realized_r")
+            if net is not None:
+                cumulative += float(net)
+                equity.append({"timestamp_utc": row.get("exit_timestamp_utc"), "cumulative_net_pnl": cumulative})
+                pnl_rows.append({"net_pnl": float(net), "gross_pnl": row.get("gross_pnl"),
+                                 "total_costs": row.get("total_costs"), "duration_seconds": row.get("duration_seconds"),
+                                 "realized_r": realized_r, "strategy": name,
+                                 "timestamp_utc": row.get("exit_timestamp_utc")})
+            if realized_r is not None and row.get("exit_timestamp_utc"):
+                realized_r = float(realized_r)
+                cumulative_r += realized_r
+                r_equity.append({"timestamp_utc": row.get("exit_timestamp_utc"), "cumulative_r": cumulative_r})
+                hmm_key = str(row.get("hmm_state")) if row.get("hmm_state") is not None else "UNAVAILABLE"
+                by_hmm.setdefault(hmm_key, []).append(row)
+                outcomes.append({key: row.get(key) for key in TRADE_METRIC_COLUMNS})
+        daily = []
+        for day, day_rows in sorted(by_day.items()):
+            daily.append({
+                "date_et": day, "trades": len(day_rows),
+                "gross_pnl": sum(float(r.get("gross_pnl") or 0) for r in day_rows),
+                "net_pnl": sum(float(r.get("net_pnl") or 0) for r in day_rows),
+                "total_costs": sum(float(r.get("total_costs") or 0) for r in day_rows),
+            })
+        contribution = []
+        strategy_metrics = {name: _trade_metrics(by_strategy.get(name, [])) for name in STRATEGIES}
+        for name, group in sorted(by_strategy.items()):
+            stats = strategy_metrics.setdefault(name, _trade_metrics(group))
+            contribution.append({"strategy": name, "trades": stats["trades"], "gross_pnl": stats["gross_pnl"],
+                                 "net_pnl": stats["net_pnl"], "total_costs": stats["total_costs"]})
+        hmm_metrics = {state: _trade_metrics(group) for state, group in sorted(by_hmm.items())}
+        return {
+            "metrics": metrics,
+            "strategies": strategy_metrics,
+            "hmm_raw_state_metrics": hmm_metrics,
+            "daily": daily,
+            "strategy_contribution": contribution,
+            "pnl_distribution": pnl_rows,
+            "cumulative_net_pnl": equity,
+            "cumulative_net_r": r_equity,
+            "trade_outcomes": outcomes,
+            "sample": {"total_closed_trades": total, "included_closed_trades": len(rows),
+                       "limit": safe_limit, "truncated": total > len(rows),
+                       "basis": "Most recent closed trades by exit time within the selected filters."},
+            "assumptions": {
+                "net_pnl": "Persisted Paper trade net P&L after stored costs.",
+                "profit_factor": "Sum of positive net P&L divided by absolute sum of negative net P&L; null when denominator is zero.",
+                "win_rate": "Winning net-P&L trades divided by closed trades with recorded net P&L.",
+                "expectancy_r": "Mean persisted realized_r among trades with a recorded R value.",
+                "cumulative_net_pnl": "Cumulative net P&L of included trades, starting at zero; not account equity.",
+                "realized_r": "Persisted net P&L divided by the stored initial risk amount where available.",
+                "cumulative_net_r": "Cumulative stored realized_r ordered by exit timestamp; not account equity.",
+                "daily": "Grouped by exit date in America/New_York.",
+            },
+        }
+
+    def recent_market_bars(self, limit: int = 1000) -> list[dict[str, Any]]:
+        safe_limit = max(1, min(int(limit), 1500))
+        rows = [dict(r) for r in self._db.execute(
+            "SELECT timestamp_utc,symbol,contract,source,open,high,low,close,volume,feature_json,final_rth "
+            "FROM market_bars ORDER BY timestamp_utc DESC LIMIT ?", (safe_limit,)
+        )]
+        rows.reverse()
+        for row in rows:
+            try:
+                row["features"] = json.loads(row.pop("feature_json"))
+            except (TypeError, json.JSONDecodeError):
+                row["features"] = None
+                row.pop("feature_json", None)
+        return rows
+
+    def recent_checkpoints(self, limit: int = 20) -> list[dict[str, Any]]:
+        safe_limit = max(1, min(int(limit), 50))
+        return [dict(r) for r in self._db.execute(
+            "SELECT timestamp_utc,action,last_processed_bar,payload_json FROM checkpoint_events "
+            "ORDER BY rowid DESC LIMIT ?", (safe_limit,)
+        )]
+
+    def trade_bars(self, trade_id: str, limit: int = 1500) -> list[dict[str, Any]]:
+        trade = self._one("SELECT entry_timestamp_utc,exit_timestamp_utc FROM trades WHERE trade_id=?", (trade_id,))
+        if not trade:
+            return []
+        entry = datetime.fromisoformat(str(trade["entry_timestamp_utc"]).replace("Z", "+00:00"))
+        end_text = trade.get("exit_timestamp_utc")
+        end = datetime.fromisoformat(str(end_text).replace("Z", "+00:00")) if end_text else entry + timedelta(hours=24)
+        start_text = (entry - timedelta(minutes=5)).astimezone(timezone.utc).isoformat()
+        final_text = (end + timedelta(minutes=5)).astimezone(timezone.utc).isoformat()
+        safe_limit = max(1, min(int(limit), 1500))
+        rows = [dict(r) for r in self._db.execute(
+            "SELECT timestamp_utc,open,high,low,close,volume FROM market_bars "
+            "WHERE timestamp_utc>=? AND timestamp_utc<=? ORDER BY timestamp_utc LIMIT ?",
+            (start_text, final_text, safe_limit),
+        )]
+        return rows
 
     def trade_detail(self, trade_id: str) -> dict[str, Any] | None:
         return self._one("SELECT * FROM trades WHERE trade_id=?", (trade_id,))

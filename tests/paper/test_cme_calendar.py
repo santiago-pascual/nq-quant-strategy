@@ -1,4 +1,7 @@
 from datetime import date, datetime, time, timezone
+from pathlib import Path
+import shutil
+from uuid import uuid4
 
 import pandas as pd
 import pytest
@@ -9,6 +12,13 @@ from src.paper.cme_calendar import (
     CalendarUnavailable,
     CME_HOLIDAY_SOURCE,
 )
+
+
+def _review_validator_scratch() -> Path:
+    """Use repository-local scratch because Windows pytest temp ACLs vary."""
+    root = Path(__file__).resolve().parents[2] / "results" / "paper" / f"cme_review_validator_{uuid4().hex}"
+    root.mkdir(parents=True, exist_ok=False)
+    return root
 
 
 @pytest.fixture
@@ -160,7 +170,7 @@ def test_thanksgiving_and_christmas_overrides_are_read_from_snapshot_schema():
     assert calendar.snapshot.session_for_rth_date(date(2026, 12, 25)).rth_end is None
 
 
-def test_cme_review_validator_checks_product_coverage_and_identity(tmp_path):
+def test_cme_review_validator_checks_product_coverage_and_identity():
     import json
     from scripts.validate_cme_snapshot import validate
 
@@ -168,26 +178,30 @@ def test_cme_review_validator_checks_product_coverage_and_identity(tmp_path):
         version="fixture-reviewed", source=CME_HOLIDAY_SOURCE,
         coverage_start=date(2026, 10, 8), coverage_end=date(2026, 10, 31),
     )
-    snapshot_path = tmp_path / "snapshot.json"
-    review_path = tmp_path / "review.json"
-    snapshot_path.write_text(json.dumps(snapshot.to_mapping()), encoding="utf-8")
-    review_path.write_text(json.dumps({
-        "source_url": CME_HOLIDAY_SOURCE, "product": "MNQ",
-        "product_name": "MNQ Micro E-mini Nasdaq-100 Index Futures",
-        "timezone": "America/New_York", "venue": "CME Globex", "product_view": "Futures",
-        "source_timezone": "America/Chicago", "selection_method": "CME Full Calendar date/product selection",
-        "coverage_start": "2026-10-08", "coverage_end": "2026-10-31",
-        "reviewed_at_utc": "2026-10-08T10:11:43Z",
-        "verified_schedule": {"october_12_2026": "regular"},
-        "snapshot_identity": snapshot.identity,
-    }), encoding="utf-8")
-    assert validate(snapshot_path, review_path)["valid"] is True
-    with pytest.raises(ValueError, match="identity"):
-        review_path.write_text(json.dumps({"snapshot_identity": "wrong"}), encoding="utf-8")
-        validate(snapshot_path, review_path)
+    scratch = _review_validator_scratch()
+    try:
+        snapshot_path = scratch / "snapshot.json"
+        review_path = scratch / "review.json"
+        snapshot_path.write_text(json.dumps(snapshot.to_mapping()), encoding="utf-8")
+        review_path.write_text(json.dumps({
+            "source_url": CME_HOLIDAY_SOURCE, "product": "MNQ",
+            "product_name": "MNQ Micro E-mini Nasdaq-100 Index Futures",
+            "timezone": "America/New_York", "venue": "CME Globex", "product_view": "Futures",
+            "source_timezone": "America/Chicago", "selection_method": "CME Full Calendar date/product selection",
+            "coverage_start": "2026-10-08", "coverage_end": "2026-10-31",
+            "reviewed_at_utc": "2026-10-08T10:11:43Z",
+            "verified_schedule": {"october_12_2026": "regular"},
+            "snapshot_identity": snapshot.identity,
+        }), encoding="utf-8")
+        assert validate(snapshot_path, review_path)["valid"] is True
+        with pytest.raises(ValueError, match="identity"):
+            review_path.write_text(json.dumps({"snapshot_identity": "wrong"}), encoding="utf-8")
+            validate(snapshot_path, review_path)
+    finally:
+        shutil.rmtree(scratch)
 
 
-def test_cme_review_validator_rejects_exceptions_outside_coverage(tmp_path):
+def test_cme_review_validator_rejects_exceptions_outside_coverage():
     import json
     from src.paper.cme_calendar import CMECalendarSnapshot, CME_HOLIDAY_SOURCE
     from scripts.validate_cme_snapshot import validate
@@ -197,21 +211,60 @@ def test_cme_review_validator_rejects_exceptions_outside_coverage(tmp_path):
         coverage_start=date(2026, 10, 8), coverage_end=date(2026, 10, 31),
         exceptions={"2028-01-01": {"session_type": "closed"}},
     )
-    snapshot_path = tmp_path / "snapshot.json"
-    review_path = tmp_path / "review.json"
-    snapshot_path.write_text(json.dumps(snapshot.to_mapping()), encoding="utf-8")
-    review_path.write_text(json.dumps({
-        "source_url": CME_HOLIDAY_SOURCE, "product": "MNQ",
-        "product_name": "MNQ Micro E-mini Nasdaq-100 Index Futures",
-        "timezone": "America/New_York", "venue": "CME Globex", "product_view": "Futures",
-        "source_timezone": "America/Chicago", "selection_method": "CME Full Calendar date/product selection",
-        "coverage_start": "2026-10-08", "coverage_end": "2026-10-31",
-        "reviewed_at_utc": "2026-10-08T10:11:43Z",
-        "verified_schedule": {"october_12_2026": "regular"},
-        "snapshot_identity": snapshot.identity,
-    }), encoding="utf-8")
-    with pytest.raises(ValueError, match="outside declared coverage"):
-        validate(snapshot_path, review_path)
+    scratch = _review_validator_scratch()
+    try:
+        snapshot_path = scratch / "snapshot.json"
+        review_path = scratch / "review.json"
+        snapshot_path.write_text(json.dumps(snapshot.to_mapping()), encoding="utf-8")
+        review_path.write_text(json.dumps({
+            "source_url": CME_HOLIDAY_SOURCE, "product": "MNQ",
+            "product_name": "MNQ Micro E-mini Nasdaq-100 Index Futures",
+            "timezone": "America/New_York", "venue": "CME Globex", "product_view": "Futures",
+            "source_timezone": "America/Chicago", "selection_method": "CME Full Calendar date/product selection",
+            "coverage_start": "2026-10-08", "coverage_end": "2026-10-31",
+            "reviewed_at_utc": "2026-10-08T10:11:43Z",
+            "verified_schedule": {"october_12_2026": "regular"},
+            "snapshot_identity": snapshot.identity,
+        }), encoding="utf-8")
+        with pytest.raises(ValueError, match="outside declared coverage"):
+            validate(snapshot_path, review_path)
+    finally:
+        shutil.rmtree(scratch)
+
+
+def test_verified_labor_day_2026_schedule_closes_the_disputed_gap_and_converts_timezones():
+    from pathlib import Path
+    from src.paper.cme_calendar import CMECalendarSnapshot, CMETradingCalendar
+
+    root = Path(__file__).resolve().parents[2]
+    snapshot_path = root / "src/paper/config/cme_mnq_calendar_2026-09-07_2026-09-08.json"
+    review_path = root / "src/paper/config/cme_mnq_calendar_2026-09-07_2026-09-08.review.json"
+    calendar = CMETradingCalendar(CMECalendarSnapshot.from_json(snapshot_path))
+    session = calendar.snapshot.session_for_rth_date(date(2026, 9, 7))
+
+    assert session.session_type == "early_close"
+    assert session.rth_end.isoformat() == "2026-09-07T13:00:00-04:00"
+    assert session.globex_close.isoformat() == "2026-09-07T13:00:00-04:00"
+    assert session.final_rth_bar.isoformat() == "2026-09-07T12:59:00-04:00"
+    assert session.final_rth_bar.astimezone(timezone.utc).isoformat() == "2026-09-07T16:59:00+00:00"
+
+    # A 16:59Z -> 22:00Z gap crosses the 13:00-18:00 EDT holiday halt and
+    # ordinary 17:00-18:00 EDT maintenance; none of its minutes are expected.
+    assert calendar.expected_missing_minutes(
+        pd.Timestamp("2026-09-07T16:59:00Z"), pd.Timestamp("2026-09-07T22:00:00Z")
+    ) == []
+    # A true omission immediately before the halt remains an expected bar.
+    assert calendar.expected_missing_minutes(
+        pd.Timestamp("2026-09-07T16:58:00Z"), pd.Timestamp("2026-09-07T17:00:00Z")
+    ) == [pd.Timestamp("2026-09-07T16:59:00Z")]
+    assert calendar.trading_date_for_timestamp(pd.Timestamp("2026-09-07T17:00:00Z")) is None
+    assert calendar.trading_date_for_timestamp(pd.Timestamp("2026-09-07T22:00:00Z")) == date(2026, 9, 8)
+
+    from scripts.validate_cme_snapshot import validate
+    result = validate(snapshot_path, review_path)
+    assert result["valid"] is True
+    assert result["coverage_start"] == "2026-09-07"
+    assert result["coverage_end"] == "2026-09-08"
 
 
 def test_future_calendar_review_template_cannot_be_loaded_as_runtime_snapshot():

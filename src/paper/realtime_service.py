@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 import json
 import os
@@ -30,6 +30,7 @@ from src.paper.cme_calendar import CMETradingCalendar, CalendarUnavailable
 from src.paper.realtime_market_data import CanonicalBar, MarketDataSource
 from src.paper.analytics_db import PaperAnalyticsStore
 from src.paper.realtime_checkpoint import engine_fingerprint
+from src.paper.runtime_compatibility import validate_runtime_identity
 from src.paper.single_writer import PaperWriterLock
 from src.paper.systemd_notify import notify_systemd
 
@@ -184,8 +185,11 @@ class RealtimePaperService:
         payload = self.checkpoint_store.load()
         if payload.get("mode") != "PAPER" or payload.get("symbol") != self.config.symbol:
             raise ValueError("Checkpoint mode or symbol differs from runtime config")
-        if payload.get("system", {}).get("runtime_identity") != runtime_identity():
-            raise ValueError("Checkpoint code or numerical dependency identity differs")
+        compatibility = validate_runtime_identity(
+            payload.get("system", {}).get("runtime_identity"), runtime_identity()
+        )
+        if not compatibility.accepted:
+            raise ValueError(f"Checkpoint runtime identity rejected: {compatibility.reason}")
         expected_calendar = self.calendar.snapshot.identity if self.calendar else None
         if payload.get("system", {}).get("calendar_identity") != expected_calendar:
             raise ValueError("Checkpoint CME calendar snapshot differs from runtime")
@@ -219,6 +223,7 @@ class RealtimePaperService:
             "run_id": self.run_id, "severity": "INFO",
             "symbol": self.config.symbol,
             "last_processed_bar": self._last_bar.timestamp.isoformat(),
+            "runtime_compatibility": compatibility.as_dict(),
         }, timestamp=datetime.now(timezone.utc))
         self._write_status()
 
@@ -667,17 +672,30 @@ class RealtimePaperService:
         else:
             before = pd.Timestamp(previous.timestamp).tz_convert("America/New_York")
             after = pd.Timestamp(bar.timestamp).tz_convert("America/New_York")
-            if before.date() != after.date():
+            # A generic RTH template cannot classify a gap spanning a session
+            # boundary: holiday halts and early closes can make those apparent
+            # RTH minutes valid closures. Require reviewed calendar coverage
+            # rather than manufacture an expected-bar list from wall time.
+            gap_start = pd.Timestamp(previous.timestamp).tz_convert("UTC").floor("min") + pd.Timedelta(minutes=1)
+            gap_end = pd.Timestamp(bar.timestamp).tz_convert("UTC")
+            if gap_start >= gap_end:
                 return
-            expected = []
-            cursor = pd.Timestamp(previous.timestamp).tz_convert("UTC").floor("min") + pd.Timedelta(minutes=1)
-            end = pd.Timestamp(bar.timestamp).tz_convert("UTC")
-            while cursor < end:
-                local_cursor = cursor.tz_convert("America/New_York")
-                minute = local_cursor.hour * 60 + local_cursor.minute
-                if local_cursor.date() == before.date() and 9 * 60 + 30 <= minute < 16 * 60:
-                    expected.append(cursor)
-                cursor += pd.Timedelta(minutes=1)
+            session_date = before.date()
+            overlaps_possible_rth = False
+            while session_date <= after.date():
+                if session_date.weekday() < 5:
+                    rth_start = pd.Timestamp(f"{session_date.isoformat()} 09:30", tz="America/New_York").tz_convert("UTC")
+                    rth_end = pd.Timestamp(f"{session_date.isoformat()} 16:00", tz="America/New_York").tz_convert("UTC")
+                    if gap_start < rth_end and gap_end > rth_start:
+                        overlaps_possible_rth = True
+                        break
+                session_date += timedelta(days=1)
+            if overlaps_possible_rth:
+                self._fail_backfill(
+                    bar,
+                    "CME calendar unavailable; cannot classify this gap as an open-session omission or scheduled closure",
+                )
+            return
         if not expected:
             return
 

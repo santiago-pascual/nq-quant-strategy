@@ -5,7 +5,7 @@ from dataclasses import asdict, dataclass
 import json
 from pathlib import Path
 import random
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
@@ -370,6 +370,9 @@ class CausalMarketContext:
         raw_bars: pd.DataFrame,
         *,
         precomputed_features: pd.DataFrame | None = None,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+        resume: bool = False,
+        total_rows: int | None = None,
     ) -> pd.Timestamp:
         """Prime production causal state from ordered historical raw OHLCV.
 
@@ -378,8 +381,15 @@ class CausalMarketContext:
         Paper engine events and per-bar context materialization before the
         requested strategy interval.
         """
-        if self._bars_seen or self._raw_hmm_provider.mr.last_timestamp is not None:
-            raise RuntimeError("Causal history bootstrap requires an empty context.")
+        has_history = bool(
+            self._bars_seen
+            or self._raw_hmm_provider.mr.last_timestamp is not None
+            or self._raw_hmm_provider.s2r.last_timestamp is not None
+        )
+        if has_history != bool(resume):
+            raise RuntimeError(
+                "Causal history bootstrap resume flag does not match context state."
+            )
         features = (
             precomputed_features
             if precomputed_features is not None
@@ -401,6 +411,18 @@ class CausalMarketContext:
             raise ValueError("Causal bootstrap timestamps must be chronological.")
         if features["timestamp"].duplicated().any():
             raise ValueError("Causal bootstrap timestamps must be unique.")
+        previous_timestamp = self.last_timestamp
+        if previous_timestamp is not None:
+            first_timestamp = pd.Timestamp(features["timestamp"].iloc[0])
+            if first_timestamp <= previous_timestamp:
+                raise ValueError("Causal bootstrap continuation must start after saved state.")
+            for stream in (self._raw_hmm_provider.mr, self._raw_hmm_provider.s2r):
+                if stream.last_timestamp != previous_timestamp:
+                    raise ValueError("Causal bootstrap HMM streams are not at the saved context boundary.")
+        base_rows = self._bars_seen
+        progress_total = int(total_rows) if total_rows is not None else base_rows + len(features)
+        if progress_total < base_rows + len(features):
+            raise ValueError("Causal bootstrap total row count is smaller than processed history.")
 
         # Prepare compact numeric matrices once. Iteration below still advances
         # every observed row in order, so neither forward chain skips a step.
@@ -411,8 +433,13 @@ class CausalMarketContext:
         # sample before it emits any of its three S2R values. The batch close
         # location feature alone becomes finite one close earlier, so preserve
         # the incremental warmup contract explicitly.
+        prior_log_returns = [row.get("log_return") for row in self._feature_rows][-29:]
+        all_log_returns = pd.concat(
+            [pd.Series(prior_log_returns), features["log_return"].reset_index(drop=True)],
+            ignore_index=True,
+        )
         directional_ready = (
-            features["log_return"].rolling(30).count().to_numpy() == 30
+            all_log_returns.rolling(30).count().iloc[len(prior_log_returns):].to_numpy() == 30
         )
         matrix[~directional_ready, feature_index["close_location_30"]] = np.nan
         raw_matrix = features.loc[:, ("open", "high", "low", "close", "volume")].to_numpy(
@@ -425,18 +452,70 @@ class CausalMarketContext:
         mr_width = len(HMM_FEATURES)
         valid_hmm = np.isfinite(matrix[:, :mr_width]).all(axis=1)
 
-        self._raw_hmm_provider = self._new_raw_hmm_provider()
-        self._raw_hmm_provider.mr._history.reserve(int(valid_hmm.sum()))
-        self._raw_hmm_provider.s2r._history.reserve(
-            int((valid_hmm & is_rth).sum())
-        )
+        if not resume:
+            self._raw_hmm_provider = self._new_raw_hmm_provider()
+            self._raw_hmm_provider.mr._history.reserve(int(valid_hmm.sum()))
+            self._raw_hmm_provider.s2r._history.reserve(
+                int((valid_hmm & is_rth).sum())
+            )
         for index, timestamp in enumerate(timestamps):
             stamp = pd.Timestamp(timestamp)
             row = dict(zip(names, matrix[index]))
+            prior_timestamp = (
+                pd.Timestamp(timestamps[index - 1]) if index else previous_timestamp
+            )
+            current_refit = None
+            if valid_hmm[index] and self._raw_hmm_provider.mr.refit_due(stamp):
+                current_refit = ("MR", self._raw_hmm_provider.mr.fit_count)
+                if progress_callback is not None:
+                    progress_callback({
+                        "rows_processed": base_rows + index,
+                        "total_rows": progress_total,
+                        "last_timestamp": prior_timestamp,
+                        "hmm_refit_status": "MR_refit_in_progress",
+                        "refit_timestamp": stamp,
+                        "force": True,
+                    })
             self._raw_hmm_provider.mr.update(stamp, row)
+            if current_refit is not None and progress_callback is not None:
+                completed = self._raw_hmm_provider.mr.fit_count > current_refit[1]
+                progress_callback({
+                    "rows_processed": base_rows + index,
+                    "total_rows": progress_total,
+                    "last_timestamp": prior_timestamp,
+                    "hmm_refit_status": (
+                        "MR_refit_completed" if completed else "MR_refit_not_fitted"
+                    ),
+                    "refit_timestamp": stamp,
+                    "force": True,
+                })
+            current_refit = None
+            if valid_hmm[index] and is_rth[index] and self._raw_hmm_provider.s2r.refit_due(stamp):
+                current_refit = ("S2R", self._raw_hmm_provider.s2r.fit_count)
+                if progress_callback is not None:
+                    progress_callback({
+                        "rows_processed": base_rows + index,
+                        "total_rows": progress_total,
+                        "last_timestamp": prior_timestamp,
+                        "hmm_refit_status": "S2R_refit_in_progress",
+                        "refit_timestamp": stamp,
+                        "force": True,
+                    })
             self._raw_hmm_provider.s2r.update(
                 stamp, row, eligible=bool(is_rth[index])
             )
+            if current_refit is not None and progress_callback is not None:
+                completed = self._raw_hmm_provider.s2r.fit_count > current_refit[1]
+                progress_callback({
+                    "rows_processed": base_rows + index,
+                    "total_rows": progress_total,
+                    "last_timestamp": prior_timestamp,
+                    "hmm_refit_status": (
+                        "S2R_refit_completed" if completed else "S2R_refit_not_fitted"
+                    ),
+                    "refit_timestamp": stamp,
+                    "force": True,
+                })
             if is_rth[index]:
                 value = self._safe_float(
                     matrix[index, feature_index["realized_vol_30"]]
@@ -446,6 +525,13 @@ class CausalMarketContext:
                     self._volatility_observations += 1
                     self._hmm_feature_history.append(value)
                 self._rth_closes.append(float(raw_matrix[index, 3]))
+            if progress_callback is not None:
+                progress_callback({
+                    "rows_processed": base_rows + index + 1,
+                    "total_rows": progress_total,
+                    "last_timestamp": stamp,
+                    "hmm_refit_status": "idle",
+                })
 
         self._bars.extend(
             self._normalize_bar(row)
@@ -454,7 +540,7 @@ class CausalMarketContext:
             ].tail(62).to_dict(orient="records")
         )
         self._feature_rows.extend(features.tail(500).to_dict(orient="records"))
-        self._bars_seen = len(features)
+        self._bars_seen = base_rows + len(features)
         return pd.Timestamp(features["timestamp"].iloc[-1])
 
     def update_with_precomputed_features(
@@ -1306,7 +1392,11 @@ class CausalMarketContext:
         return value
 
 
-def build_causal_context_features(raw: pd.DataFrame) -> pd.DataFrame:
+def build_causal_context_features(
+    raw: pd.DataFrame,
+    *,
+    progress_callback: Callable[[str, int, int, Any], None] | None = None,
+) -> pd.DataFrame:
     """Build the causal context feature history used by indexed replay and warmup."""
     from src.research.direction.direction_features import (
         add_directional_pressure_features,
@@ -1328,6 +1418,18 @@ def build_causal_context_features(raw: pd.DataFrame) -> pd.DataFrame:
             missing.add("timestamp or timestamp ET")
         raise ValueError(f"Raw market data missing columns: {sorted(missing)}")
 
+    total_rows = len(raw)
+
+    def report(stage: str, processed: int) -> None:
+        if progress_callback is not None:
+            last = (
+                features["timestamp"].iloc[-1]
+                if processed == total_rows and processed
+                else None
+            )
+            progress_callback(stage, processed, total_rows, last)
+
+    report("feature_selection_sort", 0)
     selected_columns = [
         timestamp_column,
         "open",
@@ -1347,6 +1449,7 @@ def build_causal_context_features(raw: pd.DataFrame) -> pd.DataFrame:
         "America/New_York"
     )
     features = features.sort_values("timestamp").reset_index(drop=True)
+    report("feature_selection_sort", len(features))
     local_minutes = (
         features["timestamp ET"].dt.hour * 60
         + features["timestamp ET"].dt.minute
@@ -1355,17 +1458,27 @@ def build_causal_context_features(raw: pd.DataFrame) -> pd.DataFrame:
         features["market_period"] = np.where(
             local_minutes.between(9 * 60 + 30, 17 * 60 - 1), "RTH", "ETH"
         )
+    report("feature_returns", 0)
     features = add_return_features(features)
+    report("feature_returns", len(features))
+    report("feature_volatility", 0)
     features = add_volatility_features(features)
+    report("feature_volatility", len(features))
+    report("feature_directional", 0)
     features = add_directional_pressure_features(features)
+    report("feature_directional", len(features))
+    report("feature_range_momentum", 0)
     features = add_range_location_features(features)
     features = add_normalized_momentum_features(features)
+    report("feature_range_momentum", len(features))
+    report("feature_zscore", 0)
     rth_close = pd.to_numeric(
         features["close"].where(features["market_period"].eq("RTH")),
         errors="coerce",
     ).dropna()
     rth_zscore = (rth_close - rth_close.rolling(30).mean()) / rth_close.rolling(30).std()
     features["zscore_30"] = rth_zscore.reindex(features.index)
+    report("feature_zscore", len(features))
     return features
 
 

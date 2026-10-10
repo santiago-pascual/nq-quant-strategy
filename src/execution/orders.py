@@ -16,6 +16,8 @@ from .types import (
 def create_market_order(
     intent: ExecutionIntent,
     quantity: int,
+    *,
+    order_id: str | None = None,
 ) -> Order:
     if quantity <= 0:
         raise ValueError("Order quantity must be positive")
@@ -24,7 +26,7 @@ def create_market_order(
         raise ValueError("Order side cannot be FLAT")
 
     return Order(
-        order_id=str(uuid4()),
+        order_id=order_id or str(uuid4()),
         strategy_name=intent.strategy_name,
         side=intent.signal,
         order_type=OrderType.MARKET,

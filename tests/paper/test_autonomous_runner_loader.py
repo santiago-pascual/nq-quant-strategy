@@ -87,3 +87,24 @@ def test_canonical_loader_rejects_duplicate_timestamps(monkeypatch):
 
     with pytest.raises(ValueError, match="duplicate timestamps"):
         autonomous_runner.load_canonical_raw_mnq()
+
+
+def test_oos_loader_preserves_validated_instrument_mapping(monkeypatch):
+    timestamp = pd.Timestamp("2026-08-27 00:00", tz="UTC")
+    source = pd.DataFrame({
+        "timestamp ET": [timestamp.tz_convert("America/New_York")],
+        "open": [100.0], "high": [101.0], "low": [99.0],
+        "close": [100.0], "volume": [10], "symbol": ["MNQ.v.0"],
+        "instrument_id": [42004946],
+    })
+    called = []
+
+    def loader(*, include_instrument_id=False):
+        called.append(include_instrument_id)
+        return source.copy()
+
+    monkeypatch.setattr(autonomous_runner, "load_databento_mnq", loader)
+    result = autonomous_runner.load_canonical_raw_mnq(include_contract_metadata=True)
+    assert called == [True]
+    assert result["instrument_id"].tolist() == [42004946]
+    assert result["symbol"].tolist() == ["MNQ.v.0"]

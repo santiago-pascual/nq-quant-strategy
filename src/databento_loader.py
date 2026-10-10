@@ -11,7 +11,7 @@ DATA_DIR = Path(__file__).resolve().parents[1] / "data" / "raw" / "mnq" / "ohlcv
 PRICE_SCALE = 1_000_000_000
 
 
-def load_databento_mnq() -> pd.DataFrame:
+def load_databento_mnq(*, include_instrument_id: bool = False) -> pd.DataFrame:
     """
     Load the raw Databento MNQ 1-minute dataset.
 
@@ -25,20 +25,23 @@ def load_databento_mnq() -> pd.DataFrame:
         raise FileNotFoundError(f"No Databento files found in {DATA_DIR}")
 
     frames = []
+    usecols = [
+        "ts_event",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "symbol",
+    ]
+    if include_instrument_id:
+        usecols.append("instrument_id")
 
     for path in files:
         df = pd.read_csv(
             path,
             compression="zstd",
-            usecols=[
-                "ts_event",
-                "open",
-                "high",
-                "low",
-                "close",
-                "volume",
-                "symbol",
-            ],
+            usecols=usecols,
         )
 
         frames.append(df)
@@ -76,17 +79,17 @@ def load_databento_mnq() -> pd.DataFrame:
     # STANDARDIZE ORDER
     # --------------------------------------------------------
 
-    data = data[
-        [
-            "timestamp ET",
-            "open",
-            "high",
-            "low",
-            "close",
-            "volume",
-            "symbol",
-        ]
+    ordered_columns = [
+        "timestamp ET", "open", "high", "low", "close", "volume", "symbol",
     ]
+    if include_instrument_id:
+        ordered_columns.append("instrument_id")
+    data = data[ordered_columns]
+
+    if include_instrument_id:
+        data["instrument_id"] = pd.to_numeric(data["instrument_id"], errors="raise")
+        data["instrument_id"] = data["instrument_id"].astype("int64")
+        data["symbol"] = data["symbol"].astype(str)
 
     data = data.sort_values("timestamp ET").reset_index(drop=True)
 

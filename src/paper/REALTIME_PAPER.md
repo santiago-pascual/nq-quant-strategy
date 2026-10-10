@@ -210,6 +210,188 @@ recognizes the established 15:59 ET close when no explicit marker is supplied.
 Provider credentials, reconnect policy, and historical catch-up implementation
 remain provider-specific work and are not present in this repository.
 
+## IBKR delayed-data diagnostic (read-only; not a Paper adapter)
+
+An isolated diagnostic can check a local TWS/IB Gateway API socket, resolve a
+listed MNQ futures expiry, request delayed snapshot data with
+`reqMarketDataType(3)`, and request a bounded one-day set of 1-minute `TRADES`
+bars. It never submits orders and is deliberately not wired into the Paper
+runner. Setup and test commands from the repository root:
+
+```powershell
+.\scripts\install_ibkr_diagnostic.ps1
+pytest -q tests/paper/test_ibkr_delayed_diagnostic.py
+.\.venv-ibkr-diagnostic\Scripts\python.exe -m src.paper.ibkr_delayed_diagnostic `
+  --host 127.0.0.1 --port 7497 --timeout 12
+```
+
+Use TWS Paper port 7497 or IB Gateway Paper port 4002 by default. In TWS,
+enable socket clients under API settings, allow localhost, and enable Read-Only
+API. Start logged-in TWS/Gateway separately; no account credentials belong in
+this repository or command line. An unavailable socket, unresolved contract,
+permission error, empty bars, duplicate timestamps, or invalid OHLCV is
+reported as a failed diagnostic rather than a successful feed.
+
+IBKR delayed quote mode does not guarantee that historical bars are available
+without the relevant market-data entitlement. The diagnostic reports the
+broker's observed market-data type and any API permission errors. Contract
+details report IBKR's time zone and trading/liquid-hours strings, while the
+reviewed CME calendar remains the Paper runtime's session authority. Returned
+bar timestamps are requested as epoch seconds and interpreted as UTC bar-start
+times. IBKR listed futures expiries are not a Databento `MNQ.v.0` continuous
+series; a production feed still needs an explicit, validated roll policy,
+historical catch-up, completed-bar handling, gap recovery, reconnect behavior,
+and `CanonicalBar.is_session_final` derivation. The realtime feed is therefore
+not yet connected or validated.
+
+### Bounded IBKR historical polling feasibility test
+
+`src.paper.ibkr_historical_poll` is a standalone read-only diagnostic. It
+resolves the exact supplied MNQ futures `conId` again, requests a bounded
+one-minute `TRADES` history window, then polls the same window at a conservative
+interval (default 30 seconds; identical requests are never allowed below 15
+seconds). It retains only completed UTC bar-start timestamps, deduplicates by
+`(conId, timestamp)`, compares overlaps for revisions, and writes JSON and CSV
+under `results/paper/ibkr_diagnostics/historical_poll`. It is not imported by
+Paper execution and exposes no order operations.
+
+Example for the previously resolved TWS Demo MNQZ6 contract:
+
+```powershell
+.\.venv-ibkr-diagnostic\Scripts\python.exe -m src.paper.ibkr_historical_poll `
+  --host 127.0.0.1 --port 7496 --client-id 74 `
+  --con-id 815824267 --local-symbol MNQZ6 `
+  --polls 3 --interval-seconds 30 --duration-seconds 1800 `
+  --output-dir results/paper/ibkr_diagnostics/historical_poll
+```
+
+To also exercise the reviewed-calendar finalization gate, use the Paper
+environment for pandas/CME-calendar dependencies and add the isolated API
+client site-packages for this command only:
+
+```powershell
+$env:PYTHONPATH = (Resolve-Path ".venv-ibkr-diagnostic\Lib\site-packages").Path
+.\.venv\Scripts\python.exe -m src.paper.ibkr_historical_poll `
+  --host 127.0.0.1 --port 7496 --client-id 74 `
+  --con-id 815824267 --local-symbol MNQZ6 `
+  --polls 3 --interval-seconds 30 --duration-seconds 1800 `
+  --calendar-snapshot src/paper/config/cme_mnq_calendar_2026-10-08_2026-10-31.json `
+  --output-dir results/paper/ibkr_diagnostics/historical_poll
+Remove-Item Env:PYTHONPATH
+```
+
+The process makes at most five bounded history requests and observes the
+minimum historical identical-request spacing. It records callback arrival
+times and retrieval age, but a historical endpoint cannot establish when a
+bar first became available; this is not a measurement of live-feed latency.
+Timestamp gaps are reported as unclassified because overnight/weekend/holiday
+closures must be distinguished using the reviewed CME calendar. TWS Demo
+provenance is reported as operator-supplied and unverified. IBKR TRADES volume
+units are provider-specific; equivalence to Databento volume is unverified.
+New bars may not appear during a short run, especially outside active sessions.
+That result does not prove the feed is unavailable.
+
+### Delayed-bar causal gate (development component; not Paper-connected)
+
+`src.paper.ibkr_observation_ledger` now stores an append-only JSONL observation
+record for every historical callback, including unchanged repeats. Each record
+includes conId/local symbol/expiry, UTC exchange bar start and end, callback
+observation time, raw OHLCV, source/provenance labels, value hash, version and
+revision flag. `src.paper.ibkr_delayed_market_data` supplies the independent
+finalization gate: a bar must be complete at observation, valid, inside both a
+reviewed contract window and the covered CME calendar, at least 600 seconds
+old, and unchanged across two distinct polls at least 30 seconds apart. These
+thresholds are configurable policy defaults, not a claim of provider finality.
+
+The gate emits `CanonicalBar` values in exchange-time order and can write a
+separate append-only finalized-bar journal with first-observed and finalized
+times. A gap in an expected CME Globex minute blocks later delivery until it
+is recovered; scheduled closures are skipped by the calendar. An update to a
+bar after delivery is retained in the observation ledger and reported as a
+late revision, but is never re-emitted or used to rewrite prior Paper
+decisions. Incomplete observations are not eligible for finalization.
+
+`src.paper.ibkr_delayed_acquisition` adds an atomic, versioned acquisition
+cursor plus a bounded request planner. It schedules a recent discovery query
+and an end-time-anchored confirmation query for pending bar starts. Confirmation
+windows are partitioned and rotated so a repeatedly revised oldest window
+cannot starve other pending windows. The callback observations from a wider
+confirmation response are all audited, but only timestamps in that request's
+pending set enter the finalizer. The cursor snapshots observation sequence,
+oldest pending time, confirmation rotation, last delivery and a rolling request
+budget. Observation and delivery JSONL journals are fsynced first; the cursor
+is atomically replaced last and can be reconstructed from those journals.
+Requests are limited to two per polling cycle, cycles are at least 30 seconds
+apart, and the default budget is 40 historical requests per 10 minutes.
+
+The standalone bounded diagnostic uses at most one reconnect per request; the
+delayed Paper controller now uses the indefinite paced policy described below.
+The pinned contract is resolved again before any post-reconnect request.
+Healthy-socket non-pacing provider errors are not retried. Expected missing CME minutes still block delivery;
+closures are skipped from the reviewed calendar. An in-session permanent gap
+requires an append-only operator classification with evidence and reviewer.
+Unknown contract windows and calendar dates fail closed. This remains a
+single-expiry diagnostic, not a continuous MNQ roll policy or Paper
+`MarketDataSource`.
+
+Windows bounded smoke command (TWS Demo on 127.0.0.1:7496; no order calls):
+
+```powershell
+$env:PYTHONPATH = (Resolve-Path ".venv-ibkr-diagnostic\Lib\site-packages").Path
+.\.venv\Scripts\python.exe -m src.paper.ibkr_delayed_feed_smoke `
+  --host 127.0.0.1 --port 7496 --client-id 76 `
+  --con-id 815824267 --local-symbol MNQZ6 --expiry 20261218 `
+  --cycles 3 --interval-seconds 30 `
+  --calendar-snapshot src/paper/config/cme_mnq_calendar_2026-10-08_2026-10-31.json `
+  --output-dir results/paper/ibkr_diagnostics/cursor_aware_smoke
+Remove-Item Env:PYTHONPATH
+```
+
+The Oct. 9 bounded TWS Demo checks emitted 20 ordered bars, then 2, 3, and 3
+new bars across three process restarts. The durable finalization journal
+contains 28 distinct timestamps in strict order; no restart redelivered an
+already finalized timestamp. The append-only observation journal contains 575
+callback rows for 39 contract/timestamp pairs, including five changed-value
+observations. Across all finalized bars the measured delay was 637.5–1793.5
+seconds after exchange bar end (median 1013.5 seconds). These are observed
+client finalization delays, not provider first-publication latency.
+Pre-finalization revisions were recorded and stabilized before delivery. A
+restart test found that an older version observed before a bar's durable
+finalization time must not be misclassified as a post-delivery correction;
+the finalizer now compares each observation time with that persisted timestamp.
+No post-finalization correction was verified in the final journals. No CME
+gaps were observed in the delivered span. Each three-cycle run used at most 6
+historical requests and no more than 2 in a cycle. No TWS disconnect occurred, so
+the live reconnect path was not exercised; its bounded retry and healthy-socket
+error behavior are covered by a deterministic fake-transport test. Restart,
+duplicate suppression, out-of-order sorting, late-revision non-redelivery,
+missing-gap blocking, explicit gap classification, cursor recovery and
+request pacing have focused tests.
+
+This smoke is **not connected to Paper Engine** and does not prove volume
+equivalence, production data quality, or continuous-contract behavior. There
+is no reviewed MNQZ6-to-next-expiry roll schedule; the only approved test
+mapping is MNQZ6 / conId 815824267 / expiry 2026-12-18 inside the reviewed CME
+calendar coverage. Do not wire this component into `run_realtime_paper` or
+call it live trading. A bounded isolated Paper Engine smoke remains unsafe
+until a caller supplies an explicit single-contract test window, the final
+feed-to-engine adapter boundary is implemented and reviewed, and the
+contract/volume semantics are accepted for that experiment.
+
+Focused tests:
+
+```powershell
+.venv\Scripts\python.exe -m pytest -q -p no:tmpdir -p no:cacheprovider `
+  tests/paper/test_ibkr_delayed_market_data.py `
+  tests/paper/test_ibkr_observation_ledger.py `
+  tests/paper/test_ibkr_historical_poll.py `
+  tests/paper/test_ibkr_delayed_diagnostic.py
+```
+
+The standalone TWS polling diagnostic remains available with the command
+above; its reports and per-observation ledgers stay under the distinct
+`results/paper/ibkr_diagnostics/` tree, never the OOS replay directory.
+
 The current deterministic replay runner reads only the available internal data
 through 2026-08-26 23:59 UTC. It is a development/test source, not a live feed.
 
@@ -253,6 +435,30 @@ Windows bounded replay:
 .\scripts\start_paper_replay.ps1 -Start 2026-08-25T00:00:00Z `
   -End 2026-08-26T23:59:00Z -OutputDir results/paper/replay-smoke
 ```
+
+### Explicit post-benchmark OOS replay
+
+The default replay remains capped at the frozen historical boundary. A
+post-benchmark run must opt into `-Oos`, provide exclusive data and replay
+ends, and write to a fresh `results/paper/oos_*` directory. OOS mode validates
+the `MNQ.v.0` continuous symbol, Databento instrument IDs, OHLCV values,
+timestamp uniqueness/order, and that the dataset reaches the minute before
+the requested exclusive end. Its scope manifest binds checkpoint resume to
+the same date bounds. Validate and ingest new raw data before using this
+command; it does not download data.
+
+```powershell
+.\scripts\start_paper_replay.ps1 `
+  -Start 2026-08-27T00:00:00Z `
+  -Oos `
+  -DataEndExclusive 2026-10-09T00:00:00Z `
+  -ReplayEndExclusive 2026-10-09T00:00:00Z `
+  -OutputDir results/paper/oos_20260827_20261008
+```
+
+To resume that same run, add `-Resume`; the existing scope manifest and a
+valid matching checkpoint are required. OOS output must remain separate from
+the frozen Research Replay directories.
 
 After interruption, inspect `status.json`, verify the matching checkpoint and
 resume with the same date range and `-Resume`. Request graceful stop using
@@ -420,3 +626,166 @@ sent through strategy evaluation. Adapters that cannot backfill must fail closed
 and leave the last processed checkpoint unchanged. A provider must keep its
 stream alive across reconnects or surface a reconnecting source state while it
 performs the same ordered catch-up.
+
+## Crash recovery status for delayed IBKR Paper
+
+The current Paper checkpoint contains the engine/account/risk state, strategy
+lifecycle state, broker-simulated orders/fills/positions, last committed bar,
+runtime counters, CME-calendar identity, and `CausalMarketContext.state_dict()`
+(rolling feature context plus both causal HMM streams and their scheduled
+refit state). Atomic replacement and a checksum protect the checkpoint file.
+Open simulated positions are part of a completed-bar checkpoint; real broker
+orders are never created or restored.
+
+The service currently checkpoints on its configured cadence and on order,
+position, and refit events. Events use deterministic bar-scoped idempotency
+keys, and account snapshots are replaced by exchange timestamp. These help
+replay after a prior checkpoint, but they do not make the feed cursor and Paper
+state one atomic commit.
+
+This option is not an end-to-end IBKR recovery guarantee. The standalone IBKR
+finalization/acquisition journals are not acknowledged transactionally by
+`RealtimePaperService`, and there is no IBKR `MarketDataSource` that resumes
+from the Paper checkpoint, backfills all uncommitted bars, and advances its
+acquisition cursor only after the Paper checkpoint commits. The Paper JSONL
+event log, analytics SQLite database, engine checkpoint, and IBKR ledgers are
+separate durability domains; SQLite can be rebuilt from JSONL events, but that
+does not make the market-bar and feed-cursor commit atomic.
+
+`src/paper/ibkr_paper_recovery.py` now provides an isolated append-only
+two-phase delivery ledger. It stages stable, calendar-covered bars, records a
+Paper-checkpoint acknowledgment separately, rejects conflicting values for a
+pending timestamp, pins conId/local symbol/expiry/calendar identity, and tags
+staged bars as `RECOVERED_PAPER` or `CONTINUOUS_PAPER`. A restart can enumerate
+staged but unacknowledged bars; a checkpoint newer than its acknowledgments can
+reconcile the crash-after-checkpoint-before-cursor-ack case. The ledger fails
+closed if the checkpoint is older than a previously acknowledged delivery.
+
+`src/paper/ibkr_paper_recovery.py` now also provides
+`IBKRFinalizedLedgerSource`, a journal-backed `MarketDataSource`, and
+`AcknowledgedDelayedPaperService`, which requires a one-bar checkpoint cadence.
+The service fsyncs bar-scoped events, atomically checkpoints recoverable Paper
+state, and only then acknowledges staged bars. On restart it reconciles a
+checkpoint written before a missing acknowledgment. Recovery and continuous
+provenance are carried in event context; exchange timestamps remain the Paper
+clock, while first-observed/finalized times and contract identity remain in
+the delivery journal.
+
+`src/paper/ibkr_paper_runner.py` composes the existing cursor-aware acquisition
+session, bounded request planner/pacer, observation and finalization ledgers,
+the two-phase delivery journal, and journal-backed source. Its injected
+refresh callback is exercised end-to-end with a deterministic historical-bar
+transport. `TWSHistoricalTRADESClient` is a read-only transport for the pinned
+MNQZ6 mapping; it has no order methods. The composition is programmatic and
+is not connected to the standard Paper CLI/Windows service runner.
+
+### Indefinite delayed-IBKR reconnection
+
+The delayed Paper acquisition controller now treats TWS socket failures,
+handshake timeouts, connection-closed callbacks, and IBKR connectivity codes
+1100/1101/1102/1300 (including a stale `isConnected()` result) as transient
+transport loss. It pauses acquisition without advancing observed/delivered
+bar cursors, persists an incident identity and retry state in the separate
+IBKR acquisition cursor, and retries indefinitely with a 5/10/20/40/60-second
+exponential schedule plus bounded jitter. Historical requests remain subject
+to the independent 30-second cycle and rolling IBKR pacing limits. Pacing
+responses are deferred instead of terminating Paper. Handshake recovery
+re-resolves the pinned MNQZ6 contract and read-only delayed mode; contract,
+calendar, checkpoint, and runtime-identity errors still fail closed.
+
+The delayed Paper CLI creates the transport without requiring TWS to be
+available during construction. Its acquisition worker performs the first
+handshake and can remain alive in `DISCONNECTED`/`RECONNECTING` state. Status
+includes current connection state, retry count, next retry, last verified
+handshake/request, acquisition backfill cursor, target frontier, and pending
+confirmation count. The dashboard System page presents these fields. When an
+event logger callback is supplied, a `feed_disconnected` event is written once
+for a persisted incident and a `feed_connected` event is written only after
+the provider request, calendar/backfill, pending finalization, and Paper
+delivery cursors are reconciled. The standard delayed CLI exposes the same
+transitions through status; its independent alert sidecar retains incident
+state across restarts and deduplicates notifications.
+
+Market closure remains a calendar state, separate from TWS connectivity. A
+weekend or maintenance break suppresses market-data stall classification but
+does not claim that an API disconnection was scheduled maintenance. This
+change does not add a process supervisor or automatically restart a failed
+Paper Engine process. Process restart remains a separate operator action until
+single-writer and recovery policy are authorized and validated.
+
+Future process supervision should remain separate from the feed worker and
+notifier: observe the registered process identity, require the PID to be absent,
+acquire the existing single-writer lock, validate checkpoint/runtime identity
+and delivery acknowledgments, then invoke same-run `start --resume`. Any
+ambiguous acknowledgment, invalid checkpoint, identity mismatch, or persisted
+`ERROR` state must notify and remain stopped for operator review. This is
+design guidance only; no automatic process restart is installed or enabled.
+
+The production Engine was not restarted during this change. The reconnect
+state machine was validated with deterministic disconnect/handshake fixtures;
+actual TWS recovery and subsequent Paper bar commits still require the stopped
+run to be resumed by an authorized operator.
+
+Focused tests exercise ordered acquisition/finalization/delivery, per-bar
+checkpoint-before-ack behavior, restart without duplicate Paper bar commits,
+and hard child-process termination at pre-process, mid-process,
+checkpoint-before-ack, and after-ack points. A separate hard-crash test now
+uses the real configured strategy objects and an actual ORB-generated order
+and simulated fill: the child exits after the fill but before the Paper bar
+checkpoint, then recovery replays that finalized bar and matches the
+uninterrupted engine state and order/fill event projection. A companion test
+restores an open ORB position and completes the remaining bars.
+
+Paper order/fill identifiers are derived from the execution intent and fill
+facts so identical delayed-bar replay after a crash produces stable IDs. This
+is an identifier/persistence change only; it does not change signals, sizing,
+prices, or fill timing. The Paper engine fingerprint records whether
+deterministic IDs are enabled. The general `ExecutionEngine` default remains
+unchanged for non-Paper callers.
+
+The crash test above has not yet combined a fitted causal HMM/refit boundary
+with the strategy-generated ORB fill in one process-crash run. The causal
+bootstrap tests separately validate fitted MR/S2R state and resume equality.
+Pending asynchronous strategy orders are not checkpointed: the current
+in-memory Paper broker is synchronous, and the service commits only at a
+completed-bar boundary after simulated fills settle. Adding asynchronous order
+support requires a durable order journal before enabling that execution mode.
+An actual TWS-backed Paper smoke, sustained outage catch-up, and the full
+historical calendar certificate remain outstanding. Unknown contract-roll
+dates, calendar gaps, or incomplete backfill must continue to block catch-up.
+# Restartable causal warm-up for a new Paper account
+
+`src.paper.causal_bootstrap.CausalBootstrapRunner` can build a separate,
+versioned causal-context checkpoint for a fresh Paper account. It advances the
+existing feature and raw-state HMM implementation over bars strictly earlier
+than an explicitly configured activation timestamp. Its atomic checkpoint
+contains market context/HMM state and source/configuration fingerprints; it
+does not contain trades, strategy lifecycle, orders, positions, risk history,
+or account PnL. The receiving account must be built fresh with its explicitly
+configured initial balance and frozen risk policy.
+
+The runner checkpoints after bounded row chunks and resumes only when the
+source rows, feature frame, runtime/code identity, schedule, account setup,
+coverage certificate, activation time, and historical origin match. It fails
+closed on future rows, unordered/duplicate timestamps, incompatible state, or
+unverified market-session coverage. Feature construction and full-source
+fingerprinting still require the supplied historical frames; this is not yet
+a streaming disk-backed cache, and no multi-year bootstrap has been run with
+this runner. Do not start it for a long history without an explicit runtime
+plan and verified complete calendar/data coverage.
+
+For repeatable fitted-model parameters on the validated Windows numerical
+runtime, set `OMP_NUM_THREADS=1`, `OPENBLAS_NUM_THREADS=1`, and
+`MKL_NUM_THREADS=1` before starting Python. The checkpoint identity currently
+records package/runtime and source/configuration fingerprints; operators must
+keep the numerical thread environment fixed for a bootstrap and its resume.
+The values are calculation-environment controls, not strategy/HMM parameter
+changes. Timing counters in refit diagnostics are audit data and are not
+semantic equality fields.
+
+Example invocation is intentionally left to the deployment wrapper because a
+production coverage validator must verify every required session from the
+configured origin to activation, and the October 2026 IBKR/Databento contract
+identity handoff remains unresolved for 2026-10-08. Never use the current
+IBKR bars as a substitute bootstrap source until contract identity and
+provider-volume compatibility are verified.

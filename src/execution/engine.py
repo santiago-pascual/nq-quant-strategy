@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import datetime
+from hashlib import sha256
+import json
 from typing import Dict, Optional
 from uuid import uuid4
 
@@ -21,7 +23,7 @@ from src.strategies.base import StrategyAction, StrategyDecision, StrategySignal
 class ExecutionEngine:
     """Deterministic execution engine for strategy orders and positions."""
 
-    def __init__(self, broker=None) -> None:
+    def __init__(self, broker=None, *, deterministic_ids: bool = False) -> None:
         self._orders: Dict[str, Order] = {}
         self._positions: Dict[str, Position] = {}
         self._closed_positions: Dict[str, PositionClose] = {}
@@ -29,6 +31,35 @@ class ExecutionEngine:
         self._order_intents: Dict[str, ExecutionIntent] = {}
         self._processed_fill_ids: set[str] = set()
         self._broker = broker
+        self.deterministic_ids = bool(deterministic_ids)
+
+    @staticmethod
+    def _intent_order_id(intent: ExecutionIntent, quantity: int) -> str:
+        identity = {
+            "strategy": intent.strategy_name,
+            "version": intent.strategy_version,
+            "signal": intent.signal.value,
+            "action": intent.action.value,
+            "reason": intent.reason,
+            "timestamp": intent.timestamp.isoformat(),
+            "quantity": int(quantity),
+        }
+        digest = sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        return f"PAPER-{digest[:32]}"
+
+    def _fill_id(self, order: Order, *, quantity: int, price: float, timestamp: datetime) -> str:
+        if not self.deterministic_ids:
+            return str(uuid4())
+        prior_quantity = int(order.filled_quantity)
+        identity = {
+            "order_id": order.order_id,
+            "prior_filled_quantity": prior_quantity,
+            "fill_quantity": int(quantity),
+            "price": float(price),
+            "timestamp": timestamp.isoformat(),
+        }
+        digest = sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        return f"PAPER-FILL-{digest[:32]}"
 
     @property
     def broker(self):
@@ -84,7 +115,10 @@ class ExecutionEngine:
             )
         self._register_intent(intent)
         try:
-            order = submit_order(create_market_order(intent=intent, quantity=quantity))
+            order = submit_order(create_market_order(
+                intent=intent, quantity=quantity,
+                order_id=self._intent_order_id(intent, quantity) if self.deterministic_ids else None,
+            ))
             self._orders[order.order_id] = order
             self._order_intents[order.order_id] = intent
             if self._broker is not None:
@@ -112,6 +146,7 @@ class ExecutionEngine:
             else:
                 raise ValueError("Cannot create exit order for FLAT position")
             order = create_market_order_direct(
+                order_id=self._intent_order_id(intent, position.quantity) if self.deterministic_ids else None,
                 strategy_name=intent.strategy_name,
                 side=exit_side,
                 quantity=position.quantity,
@@ -144,7 +179,7 @@ class ExecutionEngine:
         if quantity > order.remaining_quantity:
             raise ValueError("Fill quantity exceeds remaining order quantity")
         fill = Fill(
-            fill_id=str(uuid4()),
+            fill_id=self._fill_id(order, quantity=quantity, price=fill_price, timestamp=timestamp),
             order_id=order.order_id,
             strategy_name=order.strategy_name,
             side=order.side,
@@ -175,7 +210,7 @@ class ExecutionEngine:
         if quantity > order.remaining_quantity:
             raise ValueError("Fill quantity exceeds remaining order quantity")
         fill = Fill(
-            fill_id=str(uuid4()),
+            fill_id=self._fill_id(order, quantity=quantity, price=fill_price, timestamp=timestamp),
             order_id=order.order_id,
             strategy_name=order.strategy_name,
             side=order.side,

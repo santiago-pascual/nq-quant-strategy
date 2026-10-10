@@ -2,6 +2,7 @@
 # The same versions have Linux x86_64/aarch64 wheels for the core numerical
 # stack, but Linux installation/runtime has NOT been exercised in this repo.
 hmmlearn==0.3.3
+ibapi==9.81.1.post1
 joblib==1.5.3
 narwhals==2.25.0
 numpy==2.5.1
