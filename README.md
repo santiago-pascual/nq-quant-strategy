@@ -1,144 +1,161 @@
-# MNQ Quant Strategy Research and Paper Trading
+# MNQ Quant System
 
-Research and Paper execution infrastructure for four MNQ futures strategies. The repository includes frozen historical research, a deterministic Research/Paper replay, a causal HMM implementation under provisional validation, and a local Paper engine with analytics, checkpoints, shadow replay, and a protected read-only monitoring API.
+A four-strategy research and delayed Paper Trading system for Micro E-mini Nasdaq-100 futures. Historical research, causal inference, internal execution simulation and read-only monitoring have separate data and recovery boundaries.
 
-**This project is paper-only. It does not route real-money orders.** Historical backtests and simulated Paper executions are not live results and do not predict future performance.
+**PAPER ONLY. IBKR is a read-only market-data transport. No broker orders or real-money execution are enabled.** Backtests, reconstructed simulations and forward Paper observations are distinct evidence sets.
 
-## Project status at a glance
+## Architecture
 
-| Area | Status | What the evidence supports |
+```mermaid
+flowchart LR
+    DB[Databento historical MNQ.v.0] --> FC[Fingerprint-checked feature cache]
+    FC --> BS[Resumable causal bootstrap]
+    BS --> SEED[Activation-specific context/HMM seed]
+    TWS[Read-only IBKR historical TRADES] --> ACQ[Cursor-aware polling/backfill]
+    ACQ --> OBS[Append-only observation versions]
+    OBS --> FINAL[Chronological finalization]
+    FINAL --> J[Durable delivery journal]
+    SEED --> P[Four-strategy Paper Engine]
+    J --> P
+    P --> SIM[Internal simulated orders/fills and account/risk]
+    SIM --> CP[Checkpoint then acknowledgment]
+    SIM --> EVT[JSONL and SQLite WAL]
+    EVT --> API[Authenticated read-only API]
+    API --> UI[Streamlit/Plotly]
+    EVT --> NT[Telegram and independent watchdog]
+    CP --> REC[Strict recovery gates; auto-restart disabled]
+    R[Frozen Research artifacts] --> UI
+```
+
+No browser-to-database access, dashboard order endpoints or broker execution connection exist. Future LIVE monitoring interfaces remain disabled.
+
+## Strategies and causal HMM
+
+| Strategy | Role | Regime contract |
 |---|---|---|
-| Historical Research OOS | Validated historical benchmark | Frozen 2020-06-23 through 2026-06-19 portfolio: 3,255 trades and the metrics below. |
-| Research/Paper replay | Validated | 2,899 exact Paper executions; the other 356 Research trades were classified by existing account/risk gates; no mismatches or extras. |
-| Causal HMM | Implemented; provisional | Forward filtering and causal refit paths exist. The long pseudo-live run was interrupted and not completed, so this is not production validation. |
-| Realtime Paper engine | Implemented for replay/local operation | SQLite/WAL analytics, checkpoints, shadow replay and monitoring are implemented and have focused test coverage. |
-| Live market data | Not available | No connected live MNQ feed/provider or credentials are included. Current supported input is historical replay data. |
-| CME calendar | Narrow reviewed snapshot installed | MNQ Globex is verified for 2026-10-08 through 2026-10-31 only. All dates outside that window remain uncovered and fail closed. |
-| Linux deployment | Example only | A systemd replay template is provided. It has not been installed or tested on Linux. |
+| MRL1 | Long mean reversion | Raw fitted HMM component 1 |
+| MRS2 | Short mean reversion | Raw fitted HMM component 2 |
+| S2R | Short regime strategy | Raw fitted HMM component 2 |
+| ORB | New York opening-range breakout | Existing opening-range/session rules |
 
-## Strategies
+Production uses sequential forward filtering over completed, finite observations. Features are realized volatility at 5/15/30/60 bars and variance ratios 5/30 and 5/60. Population StandardScaler scaling is consistent between production training and inference. MR uses expanding training and four-calendar-month refits; S2R uses rolling two-year training and three-calendar-month refits. Training strictly precedes activation. Raw component IDs are retained without semantic alignment across fits.
 
-- **MRL1** — long mean reversion. Its strategy contract consumes raw HMM state 1.
-- **MRS2** — short mean reversion. Its strategy contract consumes raw HMM state 2.
-- **S2R** — short regime strategy with recovery analysis. It consumes raw HMM state 2; recovery enrichment is analytical and does not replace the baseline executable lifecycle.
-- **ORB** — New York opening-range breakout with one entry per session, stop/target handling, and session-close management.
+Frozen Research retains its original historical fitting/decoding methodology. Research execution parity does not establish causal HMM parity. Causal acceptance is provisional: the multi-year pseudo-live experiment was interrupted; bounded fitted-model, refit and crash/restart tests provide engineering evidence.
 
-Research strategy parameters and the frozen Research Replay are separate from the newer causal Paper HMM path. The causal provider preserves the raw fitted component IDs; it does not apply semantic state remapping.
+## Historical evidence
 
-## Historical out-of-sample benchmark
+### Frozen common OOS portfolio
 
-The frozen Research portfolio covers **2020-06-23 through 2026-06-19**. It contains **3,255 trades** and reports:
+**2020-06-23 through 2026-06-19**, independently reproduced from validated Research artifacts:
 
-| Metric | Frozen Research OOS |
+| Metric | Research OOS |
 |---|---:|
-| Total return | **+289.6619R** |
-| Expectancy | **+0.08899R/trade** |
-| Profit factor | **1.216** |
-| Win rate | **50.66%** |
-| Maximum drawdown | **−18.0935R** |
+| Trades | 3,255 |
+| Cumulative result | +289.66R |
+| Expectancy | +0.08899R/trade |
+| Profit factor | 1.216 |
+| Win rate | 50.66% |
+| Maximum drawdown | −18.09R |
 
-Strategy counts are MRL1 430, MRS2 863, S2R 520, and ORB 1,442. These are historical Research results under the repository's bar-level execution and cost assumptions. They are not realtime Paper or live results.
+Counts: MRL1 430, MRS2 863, S2R 520, ORB 1,442. The dashboard verifies reproduction reports and source hashes. Research units are risk multiples, not account dollars.
 
-## Frozen Research/Paper Replay validation
+### Frozen Research/Paper replay
 
-The completed full OOS Research Replay used frozen Research HMM states and reference trade artifacts. The run summary records `causal_inference_used: false`: this validates Paper execution against the frozen Research methodology; it does **not** validate causal HMM inference.
+2,899 exact Paper executions, 356 legitimate account/risk-gated non-executions, zero unexplained mismatches and zero Paper extras. This replay reproduces Research states; it is separate from causal forward operation.
 
-| Strategy | Frozen Research trades | Exact Paper executions | Legitimate account/risk gate | Mismatches | Paper extras |
-|---|---:|---:|---:|---:|---:|
-| MRL1 | 430 | 428 | 2 | 0 | 0 |
-| MRS2 | 863 | 806 | 57 | 0 | 0 |
-| S2R | 520 | 519 | 1 | 0 | 0 |
-| ORB | 1,442 | 1,146 | 296 | 0 | 0 |
-| **Total** | **3,255** | **2,899** | **356** | **0** | **0** |
+### Historical simulation extension and forward Paper
 
-The non-executions were classified as daily-loss, maximum-daily-trades, or validated ORB per-contract risk-cap rejections. Every executed Paper trade matched the Research comparison fields; no unexplained differences or extra Paper trades remained. Shortened-session ORB closes and S2R final-20-bar entry eligibility were included in the final replay validation. The run artifacts are generated under `results/` and are intentionally not versioned.
+Canonical local history contains 2,619,604 observed bars, **2019-05-05 22:03 UTC through 2026-10-08 13:02 UTC**. The requested historical extension is **2026-06-20 inclusive through 2026-10-08 exclusive**. Its 107,280 observed bars start June 21 at 22:00 UTC and end October 7 at 23:59 UTC. An absent trade-derived OHLCV minute is not automatically a missing required observation.
 
-## Causal HMM: implementation and validation status
+The extension pipeline reuses the engine, cost profile, seed loader and checkpoint recovery. **Extension performance is not yet validated:** a June 20 activation-specific seed and reviewed calendar are required. The October seed cannot initialize June without future information. No extension returns are interpolated or added to the frozen benchmark.
 
-`src/models/causal_hmm.py` implements causal forward filtering and model/refit/checkpoint support. The current strategy contract uses raw fitted IDs (MRL1 state 1; MRS2 and S2R state 2), with no semantic alignment between fits. The configured cadence is expanding MR training with four-calendar-month refits and rolling two-year S2R training with three-calendar-month refits. These are distinct from the frozen historical Research Replay path.
+Forward delayed Paper starts October 8, 2026 with a fresh simulated account. Its account, positions, trades and costs come only from that run. Research R and Paper USD are never concatenated. R diagnostics disclose different cost/selection assumptions and retain separate traces. One closed forward trade is insufficient for an alpha-decay conclusion.
 
-The causal HMM was provisionally accepted for further Paper integration after focused checks. A complete 2024-08-27 through 2026-08-26 pseudo-live validation did **not** complete; the run was interrupted due to runtime constraints. Therefore, no completed pseudo-live performance or full-period restart-equivalence claim is made here. Differences from frozen Research states/trades are expected because Research used its historical decoding/training methodology.
+## Data quality and CME calendar
 
-## Paper engine and analytics
+The strict historical certificate remains separate from the explicit `paper_research_quality_accepted` policy. The latter records user-accepted degraded-source uncertainty for internal simulation, preserves source hashes and rejects corrupted, invalid or nonchronological observations. It does not certify complete capture, synthesize bars or authorize LIVE.
 
-The Paper subsystem is designed for simulated execution only. Its current components include:
+Snapshots use America/New_York semantics and timezone-aware DST conversion; official CME evidence reports America/Chicago hours. Snapshots and adjacent review records are under `src/paper/config/`. The active run is pinned to October 8–31, 2026. Separately reviewed November 1–24 and November 28–30 snapshots include DST and Veterans Day; they are not installed into the active run. November 25–27 Thanksgiving phases are preserved as official evidence but remain uncovered because their extended trade-date representation needs validation. December and a future contract roll are not approved. Uncovered dates fail closed; preopen is not continuous matching.
 
-- sequential Paper engine, risk/conflict/execution and simulated broker/fill paths;
-- replay market-data source (no live MNQ provider is connected);
-- SQLite analytics store using WAL, event and trade diagnostics;
-- checkpoints and recovery/verification commands;
-- shadow replay and daily parity reporting;
-- CME calendar snapshot loader and fail-closed coverage validation;
-- local single-writer lock for a shared output directory;
-- bearer-token-protected, loopback-only, read-only monitoring API.
+Calendar updates: select **Full Calendar / Futures / MNQ** on [official CME Trading Hours](https://www.cmegroup.com/trading-hours.html), record exact phases/trade dates/timezone/review time, create a separate snapshot/review, validate and test boundaries, then validate deployment identity. Never infer a contract roll or replace the active calendar silently.
 
-The monitoring API uses a versioned JSON envelope (`schema_version: "1.0"`) and read-only routes for health, account, strategies, positions, trades, HMM/refits, feed, checkpoint, parity, events, candidates, daily reports, and risk. It has no order-entry endpoints. Do not expose it publicly without an authenticated private access path and TLS termination. The local writer lock is not cross-host fencing; do not run simultaneous Windows and cloud instances against the same account or data stream.
+```powershell
+.\.venv\Scripts\python.exe scripts/validate_cme_snapshot.py `
+  --snapshot src/paper/config/cme_mnq_calendar_2026-11-01_2026-11-03.json `
+  --review-record src/paper/config/cme_mnq_calendar_2026-11-01_2026-11-03.review.json
+```
 
-### Market data and CME calendar
+## Delayed feed, execution and recovery
 
-The current adapter supports deterministic replay, not a live feed. Live Paper remains blocked on a market-data provider, credentials, reconnect/backfill handling, and operational sequence validation.
+The IBKR adapter pins an approved outright contract. It records exchange bar-start, observation and finalization timestamps separately, deduplicates overlaps and preserves observed revisions. Delivered bars are not silently rewritten. Conservative polling, bounded backfill and paced reconnection are supported. Socket connectivity alone is not evidence of healthy bar delivery. Demo provenance and cross-provider volume limitations remain explicit.
 
-The calendar loader accepts explicit reviewed snapshots. A product-filtered official CME Full Calendar view (`Futures`, search `MNQ`) was reviewed for 2026-10-08 through 2026-10-31. The installed snapshot is `src/paper/config/cme_mnq_calendar_2026-10-08_2026-10-31.json`; its review record is the adjacent `.review.json`. The review confirms the normal MNQ Globex close/open sequence and that October 12 is not an MNQ holiday closure. The old 15-minute equity-index pause was eliminated by CME in 2021; the regular 16:00-17:00 CT maintenance break remains. No dates outside this short interval, including 2027, are certified. The validator requires this exact reviewed interval and uncovered dates fail closed. The larger unverified worksheet remains a non-runtime template.
+Orders, fills, stops/targets, fees, equity and risk gates are internal simulations. Cost profiles are versioned. Monitoring thresholds never change the engine's funded-account risk policy.
 
-### Deployment
+Bars are staged durably before processing; recoverable Paper state is checkpointed before delivery acknowledgment. Restart reconciles journals and cursors. Checkpoints retain HMM/context, strategy, position/order, account and risk state. Internal checksums, runtime compatibility and exclusive writer ownership are mandatory. Reporting-only compatibility is explicitly versioned; execution-critical fingerprints remain strict.
 
-- **Windows:** local deterministic Paper replay can be launched with `scripts/start_paper_replay.ps1` after installing the pinned environment. Use a dedicated output directory and retain its checkpoints and SQLite database.
-- **Linux:** `deploy/systemd/mnq-paper-replay.service.example` is a replay-service template only. Linux installation and runtime have not been tested in this project environment. Review paths, service user, environment file, storage and resource limits before use.
-- **Cloud:** no cloud resource has been configured. Published free-tier quotas do not establish that the workload is operationally suitable. Full history bootstrap, complete S2R refit cost, Linux runtime, and multi-host fencing remain unverified.
+Checkpoint retries preserve authoritative envelopes and backup validation. Their opt-in installer applies only to an unstarted service. Deploying to the running Engine requires an approved controlled restart. Sidecar I/O uses bounded retries and sanitized failure logs. An unresolved supervisor launch cannot create another worker merely because cooldown expired.
 
-## Reproducibility and tests
+## Monitoring and analytics
 
-Use Python 3.13 on the tested Windows x86-64 environment with `requirements-realtime-paper-py313.lock`. The lock pins versions but is not a platform-independent hash lock. Linux x86-64/ARM64 wheels were inspected, but installation/runtime was not tested; Windows ARM64 is also untested.
+- Streamlit/Plotly: account, equity/drawdown, strategies, positions/orders, trade explorer, risk, costs, rolling performance and Research/forward comparisons.
+- Bearer-authenticated read-only API with bounded SQLite queries.
+- Persistent Telegram delivery/deduplication/retries and independent PID-identity/writer-ownership watchdog.
+- Calendar-aware OPEN/CLOSED/BREAK/UNKNOWN health; provider delay, backlog and durable commits are separate metrics.
+- Daily quantitative reports and checkpoint, SQLite, disk, calendar, contract and task-health maintenance.
+- Alpha diagnostics use actual outcomes, historical references, disjoint looks and serial-dependence-aware blocks. Small samples are INSUFFICIENT_DATA, not statistical evidence of decay.
+- Parity diagnostics distinguish changed inputs, decoding, costs and unexplained execution differences. They never optimize strategies.
 
-Install in a project virtual environment:
+Tailscale provides private mobile access. Bind only to an explicitly selected private interface and narrowly scope the firewall. Never publish TWS or monitoring credentials. Telegram secrets are configured outside Git and must not appear in shell history or repository files.
+
+## Installation and operation
+
+Tested: Windows x86-64 / CPython 3.13. Runtime pins: `requirements-realtime-paper-py313.lock`; dashboard uses a separate environment. Linux/systemd examples exist, but Linux/ARM64 runtime and cloud deployment are not validated. No cloud resources are provisioned.
 
 ```powershell
 py -3.13 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-python -m pip install -r requirements-realtime-paper-py313.lock
+.\.venv\Scripts\python.exe -m pip install -r requirements-realtime-paper-py313.lock
+.\scripts\install_paper_dashboard.ps1
+$env:OMP_NUM_THREADS='1'
+$env:OPENBLAS_NUM_THREADS='1'
+$env:MKL_NUM_THREADS='1'
+$env:LOKY_MAX_CPU_COUNT='4'
 ```
 
-Focused validation commands:
+Configure TWS Paper, read-only API and the approved local port. Login/2FA may require the operator; automation does not bypass authentication. Readiness must pass before start/resume.
 
 ```powershell
-pytest -q tests\models\test_causal_hmm.py
-pytest -q tests\paper\test_realtime_paper.py tests\paper\test_analytics_store.py
-pytest -q tests\paper\test_monitoring_api.py tests\paper\test_cme_calendar.py tests\paper\test_single_writer.py tests\paper\test_systemd_notify.py
+# Status only; no Engine restart
+.\scripts\mnq_paper_system.ps1 -Mode Check
+.\.venv\Scripts\python.exe -m src.paper.delayed_paper_cli status `
+  --output-dir results/paper/delayed_mnqz6_paper_accepted_20261008_1303_r3
+.\.venv\Scripts\python.exe -m src.paper.notification_cli status
+# Desktop; specify your own private address explicitly for mobile
+.\scripts\start_paper_dashboard.ps1 -DashboardAddress 127.0.0.1 -NoBrowser
+.\scripts\write_paper_quant_reports.ps1
+# Explicit operator shutdown only
+.\scripts\mnq_paper_system.ps1 -Mode Stop
 ```
 
-On 2026-10-07, the focused causal-HMM, Paper/realtime, calendar, monitoring, risk and S2R reconstruction validation set completed with **117 passed**. This does not include a full OOS replay or completed pseudo-live run.
+Task Scheduler: `scripts/mnq_paper_system.ps1 -Mode Install`, `Check`, `RestartSidecars`, `Uninstall`. Tasks/firewall may need administrator permissions. **Production automatic Engine restart remains disabled until separately authorized.** Accounts are never automatically recreated. See [Windows operations](src/paper/WINDOWS_AUTONOMOUS_OPERATIONS.md) and [Paper runtime](src/paper/REALTIME_PAPER.md) for validated resume parameters, power-loss/sleep limitations and logs.
 
-Local replay CLI (PAPER mode only; choose timestamps inside locally available data and supply a reviewed calendar snapshot and explicit cost policy):
+Historical extension preparation (does not start replay):
 
 ```powershell
-python -m src.paper.run_realtime_paper --command run --mode PAPER `
-  --replay-start "<UTC_START_IN_LOCAL_DATA>" --replay-end "<UTC_END_IN_LOCAL_DATA>" `
-  --calendar-snapshot "<REVIEWED_MNQ_CALENDAR_JSON>" `
-  --cost-config ".\src\paper\config\topstepx_mnq_fees_2026-07.json" `
-  --output-dir results/paper/local_replay
+.\.venv\Scripts\python.exe -m src.paper.historical_extension prepare `
+  --certificate results/diagnostics/mnq_calendar_coverage_2019-05-05_2026-10-08_sparse_semantics_v5.json `
+  --report results/diagnostics/historical_extension_preparation_v1.json
 ```
 
-The supported CLI commands also include validation, stop/status, event inspection, checkpoint verification, shadow/daily reports, database backup, analytics and the read-only API. For argument details, run `python -m src.paper.run_realtime_paper --help`. Use only a calendar-covered interval and the appropriate explicit cost configuration. The deterministic historical Research Replay is separate and can be invoked with `python -m src.paper.run_research_replay --start 2020-06-23 --end 2026-06-19 --output-dir results/paper/research_replay`; it is long-running and is not required for the focused tests above.
+Existing `src.paper.causal_bootstrap_cli` supports `validate`, `benchmark`, `start`, `resume`, `status`. Preserve numerical settings, cache/source identity and coverage acceptance. See [extension procedure](docs/HISTORICAL_EXTENSION.md).
 
-## Current limitations and roadmap
+## Tests and limitations
 
-### Before autonomous realtime Paper
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests/paper -q `
+  --basetemp results/diagnostics/pytest_paper
+git diff --check
+```
 
-1. Connect and validate a real MNQ market-data provider, including credentials, reconnects, backfill and duplicate/out-of-order handling.
-2. Obtain and review authoritative product-specific CME session exceptions; install and validate the covered calendar snapshot.
-3. Validate full causal history bootstrap and scheduled refit cost; complete pseudo-live/restart validation under an approved runtime budget.
-4. Test the pinned dependencies and end-to-end replay on the chosen Linux target, if using Linux.
-5. Add cross-host/account-level fencing and operational controls before moving between machines.
+Isolated tests cover actual ORB-generated orders/fills, fitted HMM/refits, hard-process crashes, pending orders, outage catch-up, corruption/runtime mismatch, duplicate writers, read-only API, Telegram, statistics and dashboard contracts. October 11, 2026 validation: 542 Paper tests and 269 core model/strategy/risk/execution tests passed. Existing numerical-library deprecation warnings remain; they are not a claim of open-session acceptance. Exact evidence and remaining tasks are in [the progress tracker](src/paper/AUTONOMOUS_ROADMAP_PROGRESS.md).
 
-### Before a mobile client
-
-1. Freeze and version the monitoring API schema.
-2. Choose a private authenticated transport, TLS boundary, access policy, and retention/backup policy.
-3. Build the client against the read-only API; no mobile order-entry functionality is part of this project scope.
-
-No step above authorizes real-money order routing. This repository currently supports PAPER mode only.
-
-## License and risk notice
-
-See [LICENSE](LICENSE). Historical backtests and simulated fills depend on the available data, bar-level assumptions, modeled transaction costs and execution rules. Actual fills, slippage, liquidity, market impact, system failures and future regimes may differ materially. This is quantitative research and paper-trading software, not investment advice or a guarantee of future results.
+Pending: next-open-session provider/commit progression, explicit unattended-restart authorization, active-calendar renewal, approved future contract mapping and completed historical extension validation. Full-period pseudo-live performance, LIVE, public deployment and Linux readiness are not claimed. Exclude raw data, logs, SQLite, checkpoints, journals and secrets from Git.

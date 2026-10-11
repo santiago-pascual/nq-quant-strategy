@@ -11,6 +11,7 @@ import tempfile
 from typing import Any
 
 from src.paper.atomic_io import atomic_replace_with_retry
+from src.paper.snapshot_reader import read_snapshot_json
 from src.paper.cme_calendar import CMECalendarSnapshot, CMETradingCalendar
 from src.paper.monitoring_alerts import evaluate_cme_market_state
 
@@ -27,9 +28,9 @@ def _stamp(value: Any) -> datetime | None:
 
 def read_snapshot(path: Path) -> dict[str, Any] | None:
     try:
-        result = json.loads(path.read_text(encoding='utf-8'))
+        result = read_snapshot_json(path)
         return result if isinstance(result, dict) else None
-    except (OSError, UnicodeError, json.JSONDecodeError):
+    except (OSError, UnicodeError, ValueError):
         return None
 
 

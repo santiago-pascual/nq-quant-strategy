@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import traceback
 from contextlib import contextmanager
 
 from src.paper.atomic_io import atomic_replace_with_retry
@@ -21,6 +22,15 @@ from src.paper.monitoring_alerts import AlertStateStore, PaperAlertMonitor
 
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def _log_sidecar_failure(exc: Exception) -> None:
+    """Useful stack locations without exception messages, URLs or credentials."""
+    frames = [{'file': Path(frame.filename).name, 'line': frame.lineno,
+               'function': frame.name} for frame in traceback.extract_tb(exc.__traceback__)]
+    print(json.dumps({'component':'paper_notification_service',
+        'error_type':type(exc).__name__, 'errno':getattr(exc,'errno',None),
+        'winerror':getattr(exc,'winerror',None), 'frames':frames},sort_keys=True),file=sys.stderr)
 DEFAULT_RUN = "results/paper/delayed_mnqz6_paper_accepted_20261008_1303_r3"
 
 
@@ -409,10 +419,10 @@ def main(argv: list[str] | None = None) -> int:
         if "credential" in str(exc).lower():
             print(f"Notification credentials unavailable ({type(exc).__name__}); run the configure command.", file=sys.stderr)
         else:
-            print(f"Notification sidecar failed ({type(exc).__name__}); see its stderr log", file=sys.stderr)
+            _log_sidecar_failure(exc)
         return 1
     except Exception as exc:
-        print(f"Notification sidecar failed ({type(exc).__name__}); see its stderr log", file=sys.stderr)
+        _log_sidecar_failure(exc)
         return 1
 
 

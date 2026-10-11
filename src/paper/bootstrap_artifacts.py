@@ -39,7 +39,8 @@ def _atomic_json(path: Path, payload: Mapping[str, Any]) -> None:
             stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, path)
+        from src.paper.atomic_io import atomic_replace_with_retry
+        atomic_replace_with_retry(temporary, path)
     finally:
         if temporary is not None and temporary.exists():
             temporary.unlink()

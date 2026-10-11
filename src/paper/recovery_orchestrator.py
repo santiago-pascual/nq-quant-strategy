@@ -83,6 +83,8 @@ class RecoveryController:
                 market_state=market_state, register=register)
             reservation['post_launch'] = result
             reservation['worker_identity'] = expected_identity
+            if result.get('verified') is True:
+                reservation['state'] = 'VERIFIED'
             self._save(state)
             return result
 
@@ -108,6 +110,11 @@ class RecoveryController:
             if len(recent) >= self.maximum:
                 return {'state': 'ESCALATED', 'process_started': False,
                         'reason': 'restart budget exhausted; operator intervention required'}
+            if state['attempts'] and state['attempts'][-1].get('state') in {'LAUNCH_RESERVED', 'LAUNCHED_UNVERIFIED'}:
+                # A supervisor crash may leave a child that has not acquired its
+                # writer lock yet. Cooldown expiry alone never proves absence.
+                return {'state': 'RECONCILIATION_REQUIRED', 'process_started': False,
+                        'reason': 'prior launch lacks verified worker identity and post-launch evidence'}
             report = validate()
             if report.get('safe_to_resume') is not True or report.get('blockers'):
                 return {'state': 'BLOCKED', 'process_started': False, 'blockers': report.get('blockers', ['missing gates'])}

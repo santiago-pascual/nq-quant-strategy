@@ -13,6 +13,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
 from paper_dashboard.forward_diagnostics import forward_comparison
+from paper_dashboard.historical_extension import load_extension, source_timeline
 
 from paper_dashboard.research_analytics import (
     STRATEGIES, cumulative_r_series, equity_drawdown_r_series,
@@ -23,6 +24,11 @@ from paper_dashboard.research_analytics import (
 BG, SURFACE, GRID = "#0b0f14", "#111820", "#27333e"
 TEXT, MUTED, GREEN, RED, AMBER, BLUE = "#e6ebef", "#93a0ad", "#67c6a3", "#d77f87", "#d4b574", "#7f9fb4"
 INITIAL_LIVE_DATE = "2026-06-19T23:59:59.999999+00:00"
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _extension_data(root: str) -> dict:
+    return load_extension(Path(root))
 
 
 def _parse(value: Any) -> datetime | None:
@@ -153,7 +159,7 @@ def _fmt(value: Any, digits: int = 2, suffix: str = "") -> str:
 
 
 def _unified_curve(research_daily: list[dict[str, Any]], paper_rows: list[dict[str, Any]],
-                   activation: str | None, paper_truncated: bool) -> go.Figure:
+                   activation: str | None, paper_truncated: bool, extension: dict | None = None) -> go.Figure:
     research_curve = equity_drawdown_r_series(research_daily)
     paper_curve = cumulative_r_series(paper_rows, value_key="realized_r",
                                       time_key="exit_timestamp_utc")
@@ -162,6 +168,10 @@ def _unified_curve(research_daily: list[dict[str, Any]], paper_rows: list[dict[s
     if research_curve:
         fig.add_trace(_line(research_curve, "timestamp_utc", "cumulative_r", "Validated Research OOS · cumulative R", BLUE))
         research_endpoint = float(research_curve[-1]["cumulative_r"])
+    if extension and extension.get('available'):
+        extension_curve = cumulative_r_series(extension['trades'], value_key='realized_r', time_key='exit_timestamp_utc')
+        fig.add_trace(_line(extension_curve, 'timestamp_utc', 'cumulative_r',
+                            'Historical causal simulation extension · independent net R', AMBER))
     if paper_curve:
         if activation and not paper_truncated:
             paper_curve = [{"timestamp_utc": activation, "cumulative_r": 0.0}, *paper_curve]
@@ -182,14 +192,15 @@ def _unified_curve(research_daily: list[dict[str, Any]], paper_rows: list[dict[s
                       annotation_position="top right")
         fig.add_vrect(x0="2026-06-20T00:00:00+00:00", x1=activation,
                       fillcolor="rgba(147,160,173,.10)", line_width=0,
-                      annotation_text="No results represented", annotation_position="top")
+                      annotation_text="Separate historical simulation" if extension and extension.get('available') else "Historical bars available · simulation pending",
+                      annotation_position="top")
     fig.update_layout(yaxis_title="Cumulative risk units · R", legend={"orientation":"h","y":1.18,"x":0})
     return _figure_layout(fig, "Research-to-Paper · Paper rebased to Research endpoint for display", height=430)
 
 
 def _overview(research: dict[str, Any], research_rows: list[dict[str, Any]], paper_rows: list[dict[str, Any]],
               paper_metrics: dict[str, Any], data: dict[str, Any], activation: str | None,
-              paper_truncated: bool) -> None:
+              paper_truncated: bool, extension: dict | None = None) -> None:
     report = research["report"]
     expected = report["portfolio_metrics"]
     status = (data.get("status") or {}).get("system") or {}
@@ -200,9 +211,9 @@ def _overview(research: dict[str, Any], research_rows: list[dict[str, Any]], pap
         ("Paper closed trades", f"{paper_metrics.get('closed_trades',0):,}", "Persisted SQLite records only"),
         ("Paper net P&L", f"${paper_metrics.get('net_pnl_usd',0):+,.2f}" if paper_metrics.get("closed_trades") else "Unavailable", "Actual persisted Paper net USD"),
     ])
-    fig = _unified_curve(research["daily"], paper_rows, activation, paper_truncated)
+    fig = _unified_curve(research["daily"], paper_rows, activation, paper_truncated, extension)
     st.plotly_chart(fig, width="stretch", config={"displayModeBar": True, "scrollZoom": True, "displaylogo": False})
-    st.caption("Comparable view uses frozen Research `r_multiple` and Paper net `realized_r` (net P&L / stored initial risk). The Paper line is offset by the Research endpoint only to share a readable axis; it is not a continuous return chain. The blank June-to-October interval contains no inferred performance. Execution and cost assumptions differ; this is a risk-normalized diagnostic, not a parity claim.")
+    st.caption("Comparable view uses frozen Research `r_multiple` and Paper net `realized_r` (net P&L / stored initial risk). The Paper line is offset by the Research endpoint only to share a readable axis; it is not a continuous return chain. Any validated historical extension is shown independently from zero; otherwise the transition interval stays blank. Execution and cost assumptions differ; this is a risk-normalized diagnostic, not a parity claim.")
     left, right = st.columns(2)
     with left:
         st.markdown("#### Native historical Research units")
@@ -482,6 +493,14 @@ def render_analytics(data: dict[str, Any], api_json: Callable[[str], Any], outpu
     paper_truncated = bool((paper_analytics.get("sample") or {}).get("truncated"))
     run_manifest = _safe_manifest(output_dir)
     activation = run_manifest.get("activation_timestamp_utc")
+    root = Path(__file__).resolve().parents[1]
+    extension = _extension_data(str(root))
+    with st.expander('Data coverage and model timeline', expanded=True):
+        st.dataframe(source_timeline(root, activation), hide_index=True, width='stretch')
+        if not extension.get('available'):
+            st.info('June 20–October 7: local historical bars exist, but performance is unavailable until an activation-specific past-only seed and reviewed session coverage validate. October Paper state is never used retroactively.')
+        else:
+            st.caption('Validated historical causal simulation is a separate account/curve, not forward Paper and not an extension of the frozen Research certification.')
     if not activation:
         st.warning("The selected run has no valid delayed-Paper manifest activation timestamp. The transition marker and normalized Paper baseline are omitted.")
 
@@ -495,6 +514,7 @@ def render_analytics(data: dict[str, Any], api_json: Callable[[str], Any], outpu
         st.error("Start date must be on or before end date.")
         return
     strategy = None if strategy_choice == "All" else strategy_choice
+    extension = {**extension, 'trades': _filter_rows(extension.get('trades', []), strategy, start, end, 'entry_timestamp_utc')}
     research_trades = _filter_rows(research["trades"], strategy, start, end, "entry_timestamp_utc")
     paper_filtered = _filter_rows(paper_rows, strategy, start, end, "entry_timestamp_utc")
     paper_metrics = _paper_metrics(paper_filtered)
@@ -507,7 +527,7 @@ def render_analytics(data: dict[str, Any], api_json: Callable[[str], Any], outpu
     st.caption(f"Research source · {research['provenance']['model_version']} · {research['provenance']['trade_rows']:,} trades · SHA-256 `{research['provenance']['trades_sha256'][:16]}…` · Paper outcomes {len(paper_filtered)}" + (" · Paper sample truncated" if paper_truncated else ""))
 
     if chosen == "Overview":
-        _overview(research, research_trades, paper_filtered, paper_metrics, data, activation, paper_truncated)
+        _overview(research, research_trades, paper_filtered, paper_metrics, data, activation, paper_truncated, extension)
         _period_chart(research_daily, paper_filtered, "month")
     elif chosen == "Equity & Drawdown":
         _equity_drawdown(research, paper_filtered, data, strategy)
@@ -527,5 +547,15 @@ def render_analytics(data: dict[str, Any], api_json: Callable[[str], Any], outpu
             _alpha_decay(research, paper_filtered, strategy, paper_truncated)
     else:
         _execution_quality(data, paper_filtered, paper_truncated)
+    if extension.get('available'):
+        st.markdown('#### Historical causal simulation extension · separate account')
+        extension_metrics = _paper_metrics(extension['trades'])
+        _metric_cards([
+            ('Extension closed trades', str(extension_metrics['closed_trades']), 'Filtered completed simulation only'),
+            ('Extension net USD', _fmt(extension_metrics['net_pnl_usd'], suffix=' USD'), 'Includes the persisted cost profile'),
+            ('Extension net R', _fmt(extension_metrics['total_r'], suffix=' R'), 'Independent baseline; not forward Paper')])
+        extension_curve = cumulative_r_series(extension['trades'], value_key='realized_r', time_key='exit_timestamp_utc')
+        st.plotly_chart(_figure_layout(go.Figure(_line(extension_curve, 'timestamp_utc', 'cumulative_r',
+            'Historical causal simulation · net R', AMBER))), width='stretch')
     st.markdown("#### Normalization and data boundaries")
-    st.markdown("- **Research native units:** daily and trade-level R from the validated independent reproduction artifacts. Its daily curve includes the full 3,255-trade benchmark; the trade ledger itself has missing exit timestamps and those rows are excluded from exit-time strategy curves.\n- **Paper native units:** persisted account snapshots and closed-trade net USD from the selected run. Research USD is not derived from R.\n- **Comparable diagnostic:** Research `r_multiple` and Paper `realized_r` (stored net P&L divided by stored initial risk), plotted as separate segments with the June-to-October interval explicitly blank. Costs and fill assumptions differ, so the comparison is not execution parity.\n- **Future LIVE:** schema/legend placeholder only; no live trades or returns are fabricated.")
+    st.markdown("- **Research native units:** daily and trade-level R from the validated independent reproduction artifacts. Its daily curve includes the full 3,255-trade benchmark; the trade ledger itself has missing exit timestamps and those rows are excluded from exit-time strategy curves.\n- **Paper native units:** persisted account snapshots and closed-trade net USD from the selected run. Research USD is not derived from R.\n- **Comparable diagnostic:** Research `r_multiple` and Paper `realized_r` (stored net P&L divided by stored initial risk), plotted as separate segments. The transition interval stays blank until an independently validated historical simulation is available. Costs and fill assumptions differ, so the comparison is not execution parity.\n- **Future LIVE:** schema/legend placeholder only; no live trades or returns are fabricated.")

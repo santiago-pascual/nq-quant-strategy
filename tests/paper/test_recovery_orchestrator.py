@@ -64,6 +64,10 @@ def test_launch_reservation_survives_supervisor_power_loss_and_cooldown(scratch)
     restarted = RecoveryController(scratch, run_id='test')
     assert restarted.attempt(enabled=True, authorized=True, now=110, validate=gates,
                              launch=lambda: 1)['state'] == 'COOLDOWN'
+    def forbidden():
+        pytest.fail('unreconciled supervisor termination launched a second worker')
+    assert restarted.attempt(enabled=True, authorized=True, now=1000, validate=gates,
+                             launch=forbidden)['state'] == 'RECONCILIATION_REQUIRED'
 
 
 def test_crash_loop_escalates_across_restarts(scratch):

@@ -60,6 +60,7 @@ def _assert_metrics(path):
 
 def test_run_type_requires_persisted_replay_or_provider_evidence():
     assert _run_kind(None, None) == "UNAVAILABLE"
+    assert _run_kind({'classification': 'HISTORICAL_CAUSAL_SIMULATION'}, None) == 'HISTORICAL_SIMULATION_EXTENSION'
     assert _run_kind({"start_utc_inclusive": "2026-08-27T00:00:00Z"}, None) == "HISTORICAL_REPLAY"
     assert _run_kind(None, {"mode": "PAPER", "system": {"state": "RUNNING", "feed_health": {"source": "deterministic_replay"}}}) == "HISTORICAL_REPLAY"
     assert _run_kind(None, {"mode": "PAPER", "system": {"state": "RUNNING", "feed_health": {"source": "ibkr_delayed"}}}) == "REALTIME_PAPER"

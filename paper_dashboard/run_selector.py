@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import json
 from pathlib import Path
 from typing import Any
+from src.paper.snapshot_reader import read_snapshot_json
 
 
 @dataclass(frozen=True)
@@ -21,8 +22,8 @@ class RunOption:
 
 def _read_json(path: Path) -> dict[str, Any] | None:
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
+        value = read_snapshot_json(path)
+    except (OSError, UnicodeError, ValueError):
         return None
     return value if isinstance(value, dict) else None
 
@@ -34,14 +35,17 @@ def classify_run(path: Path) -> RunOption | None:
     scope = _read_json(path / "oos_run_scope.json")
     summary = _read_json(path / "run_summary.json")
     delayed_manifest = _read_json(path / "delayed_paper_run.json")
-    if not any((status_data, scope, summary, delayed_manifest)):
+    extension = _read_json(path / 'historical_extension.json')
+    if not any((status_data, scope, summary, delayed_manifest, extension)):
         return None
 
     system = (status_data or {}).get("system") or {}
     feed = system.get("feed_health") or {}
     source = str(feed.get("source") or (status_data or {}).get("source") or "")
     state = str(system.get("state") or (status_data or {}).get("status") or "UNAVAILABLE").upper()
-    if scope is not None or source == "deterministic_replay" or summary is not None:
+    if extension and extension.get('classification') == 'HISTORICAL_CAUSAL_SIMULATION':
+        kind = 'HISTORICAL_SIMULATION_EXTENSION'
+    elif scope is not None or source == "deterministic_replay" or summary is not None:
         kind = "HISTORICAL_REPLAY"
     elif delayed_manifest is not None or source.startswith("ibkr_delayed"):
         kind = "DELAYED_PAPER"

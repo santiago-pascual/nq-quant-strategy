@@ -1,4 +1,94 @@
-# Autonomous roadmap progress — October 10, 2026
+# Autonomous roadmap progress — October 11, 2026 UTC
+
+## Final development continuation — supersedes earlier pending items
+
+### Completed implementation
+
+- Windows snapshots now use delete-sharing readers, bounded transient retries,
+  and native ReplaceFileW only when os.replace is denied. Partial native failures
+  remain fail-closed. Concurrent reader/writer tests cover complete old/new JSON.
+- Bootstrap progress files use the same atomic replacement helper. A full Paper
+  regression exposed two Windows access-denied failures here; this infrastructure
+  correction preserves feature formulas, cache identities and checkpoint format.
+- Fresh service instances can explicitly select the retry-safe checkpoint store.
+  Actual ORB/fitted-HMM/refit hard-process recovery passed with that store. No
+  global monkeypatch or active Engine migration was performed.
+- Recovery controller refuses an unverified previous launch after cooldown;
+  supervisor interruption cannot create another unregistered worker. Automatic
+  production Engine restart remains DISABLED.
+- Notifier failures now log sanitized stack locations and Windows error codes,
+  without messages/URLs/credentials. The absent notifier was restarted alone;
+  Engine and watchdog were preserved. A real successful delivery is recorded at
+  2026-10-10 23:37:11 UTC. The earlier PermissionError's precise path is unproven.
+- Official CME product-filtered MNQ calendar reviewed for November 1–24 and
+  November 28–30. Validator and DST/weekend/Veterans Day tests pass. These new
+  snapshots are NOT installed in the active run. November 25–27 Thanksgiving
+  phases are preserved as source evidence, but their extended Friday trade-date
+  representation is not approved. December and a future contract roll remain
+  unapproved; uncovered dates fail closed.
+- Historical extension CLI prepares/runs/resumes an isolated June 20–October 8
+  exclusive causal simulation with all four strategies, separate account, frozen
+  risk, explicit costs, per-bar checkpoints and completion/provenance validation.
+  The dashboard displays raw-data, frozen OOS, extension and forward scopes
+  separately; incomplete simulation results never become a return curve.
+- Real canonical data preparation verified 107,280 observed extension bars:
+  June 21 22:00 UTC through October 7 23:59 UTC. June 20 was Saturday. No full
+  simulation was launched: a compatible June 20 activation seed and reviewed
+  calendar for this interval are required. The October seed is rejected for June.
+  Current fee configuration is a stated scenario, not proof of June's exact fees.
+- Public README documents implemented architecture, methodology, limits and
+  commands, without private addresses, personal paths or credentials.
+
+### Tests and operational evidence
+
+- Initial entire tests/paper run: 531 passed, 4 failed, 628.55 seconds. Two failed
+  risk doubles lacked existing optional evaluate arguments; doubles now forward
+  those arguments unchanged. Two bootstrap progress Windows failures corrected.
+- Affected realtime/risk/bootstrap suites: 39 passed, 211.03 seconds. Extension,
+  dashboard API and risk focused checks: 20 passed. Recovery controller/worker/
+  post-launch tests: 33 passed. Actual retry-store hard-process HMM/ORB recovery:
+  1 passed in 93.69 seconds. Counts overlap; do not sum them.
+- Final complete tests/paper regression: **542 passed, 0 failed**, 822.17 seconds,
+  recorded in results/diagnostics/final_paper_verified.log. Upstream
+  hmmlearn/NumPy deprecation warnings (4,148) are retained; no numerical dependency
+  was upgraded to silence them. Additional late extension contract checks passed
+  in the focused suite below.
+- Read-only SQLite quick_check: VALID / ok in 2.99 seconds. Earlier two-second
+  timeout was UNAVAILABLE, not a corruption finding. Both checkpoint envelopes
+  and execution runtime compatibility passed; primary/backup hashes unchanged.
+- Engine 39536 RUNNING; 1,857 committed bars, last October 9 20:59 UTC,
+  backlog zero, equity $49,760.78, no open positions. Watchdog 36524 fresh; notifier
+  worker 44732 fresh. Dashboard HTTP health is ok. These are timestamped checks,
+  not a claim of open-session progression. CME market is closed for the weekend.
+  At 02:49 UTC the feed changed to RECONNECTING, with socket failure/error 502.
+  Existing paced recovery is running; this is not verified TWS maintenance.
+  All eight dashboard pages rendered without exceptions. System Observatory
+  intentionally displays that persisted connection error, not a UI failure.
+- Actual desktop and 390x844 browser inspection confirmed the selected delayed
+  run, account values and separate timeline. No horizontal page overflow at the
+  phone width. System errors remain visible rather than relabeled as healthy.
+- Core models/strategies/risk/execution/broker/portfolio: 269 passed in 46.07s.
+  Final extension/API/run-selector tests: 24 passed in 7.29s. Atomic/snapshot/
+  calendar/sidecar diagnostics: 26 passed. These focused counts overlap with the
+  complete Paper regression. Frontend modules compile in the dashboard venv.
+- At 03:00 UTC notifier delivery is unblocked, pending false, attempts zero;
+  delivered records are present at 02:45:36 and 02:58:51 UTC. No duplicate test
+  production notification was sent. Task Scheduler lists all five MNQ tasks Ready.
+  The TWS API port currently has no listener; operator authentication/API setup
+  may be needed. Maintenance was not inferred from the weekend alone.
+
+### Exact next work / production gates
+
+1. At Sunday reopening, verify provider AND durable-commit progression with the
+   existing continuity CLI. Closed-session tests cannot prove a new live session.
+2. Prepare a June 20 causal seed using the existing checkpointed bootstrap and
+   certify the extension calendar; commands are in docs/HISTORICAL_EXTENSION.md.
+   Do not reuse October causal state retroactively or fabricate gap performance.
+3. Validate Thanksgiving's extended trade-date representation, December calendar
+   and explicit contract approval before switching any active calendar identity.
+4. Deploy checkpoint-retry activation only during an approved controlled Engine
+   restart. Production automatic restart still requires explicit authorization.
+
 
 ## Continued sprint — latest acceptance evidence (20:48 UTC and later)
 
@@ -216,7 +306,7 @@ From the repository root:
 .\scripts\mnq_paper_system.ps1 -Mode Stop
 ```
 
-Dashboard: `http://100.114.250.67:8501` (private Tailscale).
+Dashboard: `http://<your-private-Tailscale-IP>:8501` (private Tailscale).
 Reports: `results/diagnostics/quant_reports/<run-id>`.
 Health evidence: `results/diagnostics/roadmap_paper_health_20261010_final.json`.
 Reports are retried by the existing notifier; no new execution backend.

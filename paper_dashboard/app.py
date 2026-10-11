@@ -217,6 +217,7 @@ def _status_line(run: dict[str, Any]) -> None:
     kind = run.get("kind") or "UNAVAILABLE"
     status = run.get("status") or "UNAVAILABLE"
     label = ("Historical replay · simulated results" if kind == "HISTORICAL_REPLAY"
+             else "Historical causal extension · simulated results" if kind == "HISTORICAL_SIMULATION_EXTENSION"
              else "Delayed Paper · simulated fills" if kind == "DELAYED_PAPER"
              else "Realtime Paper · simulated fills" if kind == "REALTIME_PAPER" else str(kind))
     color = GREEN if status in {"RUNNING", "COMPLETED", "CAUGHT_UP"} else RED if status in {"FAILED", "DEGRADED", "ERROR"} else AMBER
@@ -282,7 +283,7 @@ def _empty(message: str) -> None:
 def _scope_caption(run: dict[str, Any]) -> None:
     scope = run.get("scope") or {}
     if scope:
-        st.caption(f"Scope · {_stamp(scope.get('start_utc_inclusive'))} → {_stamp(scope.get('replay_end_utc_exclusive'))} (exclusive)")
+        st.caption(f"Scope · {_stamp(scope.get('start_utc_inclusive'))} → {_stamp(scope.get('replay_end_utc_exclusive') or scope.get('end_utc_exclusive'))} (exclusive)")
     else:
         st.caption("No replay scope is persisted. Historical or realtime classification follows the run manifest and status files.")
 

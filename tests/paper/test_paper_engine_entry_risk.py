@@ -54,11 +54,15 @@ class RecordingRiskEngine(RiskEngine):
         super().__init__(limits)
         self.requests = []
 
-    def evaluate(self, request, *, trading_day):
+    def evaluate(self, request, *, trading_day, risk_per_trade_budget=None,
+                 adaptive_quantity=None, adaptive_risk_limit=None):
         self.requests.append(request)
         return super().evaluate(
             request,
             trading_day=trading_day,
+            risk_per_trade_budget=risk_per_trade_budget,
+            adaptive_quantity=adaptive_quantity,
+            adaptive_risk_limit=adaptive_risk_limit,
         )
 
 

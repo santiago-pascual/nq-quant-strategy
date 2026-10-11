@@ -1,0 +1,24 @@
+{
+  "review_status": "REVIEWED_PRODUCT_FILTERED_CME_GLOBEX",
+  "source_url": "https://www.cmegroup.com/trading-hours.html",
+  "product": "MNQ",
+  "product_name": "MNQ Micro E-mini Nasdaq-100 Index Futures",
+  "product_view": "Futures",
+  "venue": "CME Globex",
+  "source_timezone": "America/Chicago",
+  "timezone": "America/New_York",
+  "coverage_start": "2026-11-01",
+  "coverage_end": "2026-11-24",
+  "reviewed_at_utc": "2026-10-11T02:39:06.175933+00:00",
+  "snapshot_identity": "9d1c2d4e003cbf9f48085c8e2a4674349f01bac1b04794432980f0df92627d60",
+  "selection_method": "Official CME Full Calendar; Futures checked; product search MNQ; exactly one MNQ Micro E-mini Nasdaq-100 Index Futures result. Reviewed three adjacent columns for each date selection: 2026-11-02, 2026-11-05, 2026-11-08, 2026-11-11, 2026-11-14, 2026-11-17, 2026-11-20, 2026-11-23.",
+  "verified_schedule": {
+    "ordinary_weekdays": "Each reviewed weekday column closes 16:00 CT and starts the next trade date with 16:45 preopen, 17:00 open, except Fridays which close without evening reopen.",
+    "sunday_reopen": "16:00 preopen, 17:00 continuous open CT; preopen generates no bars.",
+    "weekends": "Saturday columns have no MNQ matching session.",
+    "DST": "November 1 onward: 17:00 CT open = 18:00 ET = 23:00 UTC; 16:00 CT close = 17:00 ET = 22:00 UTC.",
+    "rth_strategy_window": "09:30-16:00 ET is the existing frozen strategy convention, not an extra CME trading phase.",
+    "2026-11-11": "Veterans Day exact MNQ column shows normal 16:00 CT close and 17:00 CT next trade-date open; no exception entered."
+  },
+  "coverage_limitations": "Not installed in the active run. November 25-27 remains outside these snapshots: the official Thanksgiving trade-date phases cross calendar dates and require a representation audit before activation. No December or contract-roll approval. A reviewed source is still subject to CME updates."
+}

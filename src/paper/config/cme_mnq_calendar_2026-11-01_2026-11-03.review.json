@@ -1,0 +1,22 @@
+{
+  "review_status": "REVIEWED_PRODUCT_FILTERED_CME_GLOBEX",
+  "source_url": "https://www.cmegroup.com/trading-hours.html",
+  "product": "MNQ",
+  "product_name": "MNQ Micro E-mini Nasdaq-100 Index Futures",
+  "product_view": "Futures",
+  "venue": "CME Globex",
+  "source_timezone": "America/Chicago",
+  "timezone": "America/New_York",
+  "coverage_start": "2026-11-01",
+  "coverage_end": "2026-11-03",
+  "reviewed_at_utc": "2026-10-10T21:26:00Z",
+  "snapshot_identity": "1ebb1c2d2daeb77c290fb3c5ce4c2f91d68eb7cc885b45c24df06ec7602d95f4",
+  "selection_method": "Official CME Trading Hours interactive Full Calendar; Date Monday, 02 Nov 2026; Futures checked, Options unchecked; product search MNQ; one result, exact MNQ product row. Three adjacent columns cover November 1, 2 and 3. DOM transcription captured during this review; Download data did not produce a browser download within 15 seconds.",
+  "verified_schedule": {
+    "2026-11-01": "Sunday column: TRADE DATE Mon 02 Nov; 16:00 preopen; 17:00 open, America/Chicago. Only 17:00 begins continuous matching. This is 18:00 America/New_York, 23:00 UTC after DST ends.",
+    "2026-11-02": "Monday column: TRADE DATE Mon 02 Nov; 16:00 closed; TRADE DATE Tue 03 Nov; 16:45 preopen; 17:00 open, America/Chicago.",
+    "2026-11-03": "Tuesday column: TRADE DATE Tue 03 Nov; 16:00 closed; TRADE DATE Wed 04 Nov; 16:45 preopen; 17:00 open, America/Chicago. Wednesday's remaining session is outside coverage.",
+    "rth_strategy_window": "09:30-16:00 America/New_York remains the frozen strategy convention; it is not an additional CME matching phase inferred from this table."
+  },
+  "coverage_limitations": "Separate, bounded extension only. November 4 onward and Thanksgiving/Christmas are not certified by this record. Not installed in the active run: replacing its approved calendar would change persisted calendar identity and requires separately validated migration. Preopen is not tradable and generates no bars."
+}

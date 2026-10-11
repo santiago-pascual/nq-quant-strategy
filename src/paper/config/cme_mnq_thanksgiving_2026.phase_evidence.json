@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "product": "MNQ",
+  "product_name": "MNQ Micro E-mini Nasdaq-100 Index Futures",
+  "venue": "CME Globex",
+  "source_url": "https://www.cmegroup.com/trading-hours.html",
+  "source_timezone": "America/Chicago",
+  "reviewed_at_utc": "2026-10-11T02:39:06.180232+00:00",
+  "review_status": "SOURCE_PHASES_OBSERVED_NOT_APPROVED_RUNTIME_REPRESENTATION",
+  "selected_date": "2026-11-26",
+  "columns": {
+    "2026-11-25": [
+      {
+        "trade_date": "2026-11-25",
+        "phase": "closed",
+        "time": "16:00"
+      },
+      {
+        "trade_date": "2026-11-27",
+        "phase": "preopen",
+        "time": "16:45"
+      },
+      {
+        "trade_date": "2026-11-27",
+        "phase": "open",
+        "time": "17:00"
+      }
+    ],
+    "2026-11-26": [
+      {
+        "trade_date": "2026-11-27",
+        "phase": "preopen",
+        "time": "12:00"
+      },
+      {
+        "trade_date": "2026-11-27",
+        "phase": "open",
+        "time": "17:00"
+      }
+    ],
+    "2026-11-27": [
+      {
+        "trade_date": "2026-11-27",
+        "phase": "closed",
+        "time": "12:15"
+      }
+    ]
+  },
+  "blocker": "Current snapshot session model assigns a weekday trade date and an opening on the immediately previous date. CME Thanksgiving exposes Friday trade date starting Wednesday. Do not replace this with inferred Thursday hours or certify it until phase/trade-date semantics are supported and tested."
+}

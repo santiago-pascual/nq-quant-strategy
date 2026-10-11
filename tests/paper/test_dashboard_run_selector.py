@@ -6,6 +6,17 @@ import shutil
 from paper_dashboard.run_selector import classify_run, default_run, discover_runs
 
 
+def test_oversized_status_remains_unavailable(tmp_path):
+    (tmp_path/'status.json').write_text(' ' * 4_000_001)
+    assert classify_run(tmp_path) is None
+
+
+def test_extension_classification_is_separate_from_forward_paper(tmp_path):
+    (tmp_path/'historical_extension.json').write_text(json.dumps({
+        'classification': 'HISTORICAL_CAUSAL_SIMULATION'}))
+    assert classify_run(tmp_path).kind == 'HISTORICAL_SIMULATION_EXTENSION'
+
+
 def _write(path: Path, name: str, value: dict) -> None:
     (path / name).write_text(json.dumps(value), encoding="utf-8")
 

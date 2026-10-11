@@ -219,6 +219,24 @@ def test_bootstrap_state_rejects_corrupt_version_and_hmm_schema():
         CausalMarketContext(MarketContextConfig()).load_state_dict(corrupt_schema)
 
 
+def test_bootstrap_progress_retries_transient_windows_replacement(tmp_path, monkeypatch):
+    from src.paper import atomic_io
+    from src.paper.bootstrap_artifacts import _atomic_json
+    real = atomic_io._replace_once
+    calls = []
+    def sharing_once(source, destination):
+        calls.append(1)
+        if len(calls) == 1:
+            raise PermissionError('isolated sharing violation')
+        return real(source, destination)
+    monkeypatch.setattr(atomic_io, '_replace_once', sharing_once)
+    path = tmp_path/'progress.json'
+    _atomic_json(path, {'rows': 1})
+    assert len(calls) == 2
+    assert json.loads(path.read_text()) == {'rows': 1}
+    assert not list(tmp_path.glob('*.tmp'))
+
+
 def test_bootstrap_progress_writes_atomic_stage_and_refit_status():
     path = Path(__file__).resolve().parent / f".bootstrap_progress_{os.getpid()}_{uuid.uuid4().hex}.json"
     try:

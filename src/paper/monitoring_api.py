@@ -12,6 +12,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 from datetime import date, datetime, time, timedelta, timezone
 
 from src.paper.analytics import PaperAnalyticsReader
+from src.paper.snapshot_reader import read_snapshot_json
 
 
 API_SCHEMA_VERSION = "1.0"
@@ -51,6 +52,8 @@ def _read_fill_rows(db: sqlite3.Connection, limit: int = 100) -> list[dict[str, 
 def _run_kind(scope: dict[str, Any] | None, status: dict[str, Any] | None) -> str:
     """Classify only when a persisted run manifest or provider status supports it."""
     if scope:
+        if scope.get('classification') == 'HISTORICAL_CAUSAL_SIMULATION':
+            return 'HISTORICAL_SIMULATION_EXTENSION'
         return "HISTORICAL_REPLAY"
     if not status or status.get("mode") != "PAPER":
         return "UNAVAILABLE"
@@ -171,9 +174,13 @@ def create_monitoring_server(
             return {"strategy": strategy, "start": start, "end": end}
 
         def _dashboard_snapshot(self) -> dict[str, Any]:
-            status = json.loads(status_file.read_text(encoding='utf-8')) if status_file.is_file() else None
-            scope = json.loads((directory / "oos_run_scope.json").read_text(encoding="utf-8")) \
+            status = read_snapshot_json(status_file) if status_file.is_file() else None
+            scope = read_snapshot_json(directory / "oos_run_scope.json") \
                 if (directory / "oos_run_scope.json").is_file() else None
+            if scope is None and (directory / 'historical_extension.json').is_file():
+                scope = read_snapshot_json(directory / 'historical_extension.json')
+                if scope.get('classification') == 'HISTORICAL_CAUSAL_SIMULATION':
+                    scope = {**scope, 'replay_end_utc_exclusive': scope.get('end_utc_exclusive')}
             replay = bool(scope)
             system_state = (status or {}).get("system", {}).get("state")
             last_bar = (status or {}).get("system", {}).get("last_bar")
@@ -286,7 +293,7 @@ def create_monitoring_server(
         def _data(self, route: str, query: dict[str, list[str]] | None = None) -> Any:
             query = query or {}
             if route == "/v1/health":
-                status = json.loads(status_file.read_text(encoding='utf-8')) if status_file.is_file() else {"system": {"state": "UNAVAILABLE"}}
+                status = read_snapshot_json(status_file) if status_file.is_file() else {"system": {"state": "UNAVAILABLE"}}
                 feed = self._with_reader(lambda r: r.feed_status())
                 checkpoint = self._with_reader(lambda r: r.latest_checkpoint())
                 return {"mode": "PAPER", "status": status, "feed": feed, "checkpoint": checkpoint}
@@ -340,14 +347,14 @@ def create_monitoring_server(
                 return {"available": False, "active": [], "history": [],
                         "capabilities": {"state": "NOT_STARTED"}}
             try:
-                saved = json.loads(alert_path.read_text(encoding="utf-8"))
+                saved = read_snapshot_json(alert_path)
                 public = lambda row: {key: value for key, value in row.items() if not str(key).startswith("_")}
                 runtime = alert_path.parent
                 now = datetime.now(timezone.utc)
 
                 def read_json(name: str) -> dict[str, Any] | None:
                     try:
-                        value = json.loads((runtime / name).read_text(encoding="utf-8"))
+                        value = read_snapshot_json(runtime / name)
                         return value if isinstance(value, dict) else None
                     except (OSError, json.JSONDecodeError, TypeError):
                         return None
